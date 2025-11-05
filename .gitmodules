@@ -1,0 +1,3 @@
+[submodule "third-party/lama"]
+	path = third-party/lama
+	url = https://github.com/PLTools/Lama.git

@@ -1,0 +1,1 @@
+option('runtime_path', type: 'string', value: 'third-party/lama/runtime', description: 'A path to the Lama runtime directory')
