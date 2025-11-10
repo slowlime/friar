@@ -1,8 +1,8 @@
 #import "@preview/meander:0.2.4"
 
-#let revision-no = 4
+#let revision-no = 5
 
-#set page(columns: 4, margin: 0.5cm, flipped: true, header: align(right)[_Revision #(revision-no)_])
+#set page(columns: 4, margin: 0.5cm, flipped: true)
 #set columns(gutter: 5pt)
 #set text(7pt, hyphenate: true)
 #set par(spacing: 1em, leading: 0.5em, justify: true)
@@ -13,9 +13,13 @@
 #let pops(body) = text(fill: pop-color, body)
 #let pushes(body) = text(fill: push-color, body)
 
-#place(top + center, float: true, scope: "parent")[
+#place(top + center, float: true, scope: "parent", block(width: 100%)[
   = $bold(λ^α cal(M)^α)$ bytecode reference
-]
+
+  #place(top + right)[
+    _Revision #(revision-no)_
+  ]
+])
 
 #let entries = (
   (`BINOP +`, `01`, [Adds two integers, with wraparound.], 2, 1),
@@ -67,13 +71,13 @@
     Tests if either of the operands is non-zero.
   ], 2, 1),
 
-  ([`CONST `$k$], [`10 [`$k$`: i32]`], [Pushes the $k$th constant from the constant pool onto the stack.], 0, 1),
+  ([`CONST `$k$], [`10 [`$k$`: i32]`], [Pushes a constant immediate $k$ onto the stack as an integer value.], 0, 1),
 
-  ([`STRING `$s$], [`11 [`$s$`: i32]`], [Pushes the $s$th string from the string table onto the stack.], 0, 1),
+  ([`STRING `$s$], [`11 [`$s$`: i32]`], [Pushes a string starting at offset $s$ in the string table onto the stack.], 0, 1),
 
   ([`SEXP `$s$` `$n$], [`12 [`$s$`: i32] [`$n$`: i32]`], [
     Constructs an S-expression with $n$ members.
-    The $s$th string from the string table is used as the tag.
+    A string starting at offset $s$ in the string table is used as the tag.
   ], $n$, 1),
 
   (`STI`, `13`, [
@@ -223,7 +227,7 @@
   ], $n$, 1),
 
   ([`TAG `$s$` `$n$], [`57 [`$s$`: i32] [`$n$`: i32]`], [
-    Tests whether the operand is an S-expression with a specific tag (the $s$th string in the string table) and number of elements ($n$).
+    Tests whether the operand is an S-expression with a specific tag (the string starting at offset $s$ in the string table) and number of elements ($n$).
 
     If the operand is not an S-expression, pushes $0$.
   ], 1, 1),
@@ -234,8 +238,8 @@
     Raises an error, reporting a match failure at line $"ln"$, column $"col"$ (both 1-based). The operand is the value being matched.
   ], 1, $!$),
 
-  ([`LINE `$n$], [`5a [`$n$`: i32]`], [
-    Marks the following bytecode as corresponding to line $n$ in the source text.
+  ([`LINE `$"ln"$], [`5a [`$"ln"$`: i32]`], [
+    Marks the following bytecode as corresponding to line $"ln"$ in the source text.
     Only used for diagnostics.
   ], 0, 0),
 

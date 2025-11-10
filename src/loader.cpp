@@ -1,11 +1,9 @@
 #include "loader.hpp"
 
-#include <algorithm>
 #include <bit>
 #include <cerrno>
 #include <format>
 #include <ios>
-#include <iterator>
 #include <memory>
 #include <span>
 #include <utility>
@@ -128,6 +126,7 @@ std::expected<void, Loader::Error> Loader::load_header() {
 
     for (size_t i = 0; i < symtab_entries; ++i) {
         Sym sym;
+        sym.offset = pos_;
 
         if (auto r = load_u32("a symbol table entry's address"); r) {
             sym.address = *r;
@@ -136,7 +135,7 @@ std::expected<void, Loader::Error> Loader::load_header() {
         }
 
         if (auto r = load_u32("a symbol table entry's name"); r) {
-            sym.name_offset = *r;
+            sym.name = *r;
         } else {
             return std::unexpected(std::move(r).error());
         }
@@ -159,6 +158,7 @@ std::expected<void, Loader::Error> Loader::load_bytecode() {
     constexpr size_t buf_size = 4096;
 
     auto pos = pos_;
+    mod_.bytecode_offset = pos;
     auto buf = std::make_unique<Instr[]>(4096);
 
     while (true) {
@@ -173,23 +173,6 @@ std::expected<void, Loader::Error> Loader::load_bytecode() {
         } else {
             return std::unexpected(std::move(r).error());
         }
-    }
-
-    auto it = std::ranges::find(mod_.bytecode, Instr::Eof);
-
-    if (it == mod_.bytecode.end()) {
-        return std::unexpected(
-            make_error("no end-of-file marker found in the bytecode section", pos_)
-        );
-    }
-
-    auto idx = std::distance(mod_.bytecode.begin(), it);
-
-    if (idx != mod_.bytecode.size()) {
-        return std::unexpected(make_error(
-            "the end-of-file marker in the bytecode section must be the final byte in the file",
-            pos + idx
-        ));
     }
 
     return {};

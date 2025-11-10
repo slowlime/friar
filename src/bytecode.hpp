@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace friar::bytecode {
@@ -70,11 +72,14 @@ enum class Instr : uint8_t {
 
 /// A public symbol declaration.
 struct Sym {
+    /// A byte offset in the file where this symbol is defined.
+    size_t offset = 0;
+
     /// An address in the bytecode.
     uint32_t address = 0;
 
     /// The name associated with this symbol; stored as an offset into the string table.
-    uint32_t name_offset = 0;
+    uint32_t name = 0;
 };
 
 /// A Lama bytecode module.
@@ -88,11 +93,23 @@ struct Module {
     /// The symbol table.
     std::vector<Sym> symtab;
 
+    /// The symbol table, represented as a map.
+    ///
+    /// Initialized during module verification.
+    std::unordered_map<std::string_view, uint32_t> symtab_map;
+
     /// The string table.
     std::vector<char> strtab;
 
-    /// The program bytecode (does not include the end-of-file marker).
+    /// The offset of the bytecode section in the file.
+    uint32_t bytecode_offset = 0;
+
+    /// The program bytecode (includes the end-of-file marker).
     std::vector<Instr> bytecode;
+
+    std::string_view strtab_entry_at(uint32_t offset) {
+        return &strtab.at(offset);
+    }
 };
 
 } // namespace friar::bytecode
