@@ -15,6 +15,7 @@ using util::overloaded;
 namespace {
 
 constexpr uint32_t max_stack_height = 0x7fff'ffff;
+constexpr uint32_t max_captures = 0x7fff'ffff;
 
 class Verifier {
 public:
@@ -25,12 +26,7 @@ public:
     std::expected<void, Error> verify() {
         compute_last_strtab_entry();
 
-        // TODO: verify CLOSURE instrs.
-
-        // clang-format off
-        return verify_symtab()
-            .and_then([this] { return verify_bytecode(); });
-        // clang-format on
+        return verify_symtab().and_then([this] { return verify_bytecode(); });
     }
 
 private:
@@ -134,6 +130,7 @@ private:
         uint32_t locals = 0;
         uint32_t captures = 0;
         uint32_t stack_size = 0;
+        bool is_closure = false;
     };
 
     struct Closure {
@@ -150,6 +147,7 @@ private:
 
     using PostValidateReq = std::variant<Closure, Call>;
 
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity)
     std::expected<void, Error> verify_bytecode() {
         while (!to_verify_.empty()) {
             auto req = to_verify_.back();
@@ -165,6 +163,107 @@ private:
                     }
                 },
                 req.kind
+            );
+
+            if (!r) {
+                return r;
+            }
+        }
+
+        for (const auto &req : post_validate_reqs_) {
+            auto r = std::visit(
+                overloaded{
+                    [&](const Closure &req) -> std::expected<void, Error> {
+                        if (req.target_addr >= bc_.size()) {
+                            return std::unexpected(Error(
+                                req.addr,
+                                std::format(
+                                    "the closure instantiation refers to address {:#x}, which is "
+                                    "out of bounds for the bytecode section of size {:#x}",
+                                    req.target_addr,
+                                    bc_.size()
+                                )
+                            ));
+                        }
+
+                        auto it = procs_.find(req.target_addr);
+
+                        if (it == procs_.end()) {
+                            return std::unexpected(Error(
+                                req.addr,
+                                std::format(
+                                    "the closure instantiation refers to address {:#x}, which is "
+                                    "not a procedure definition",
+                                    req.target_addr
+                                )
+                            ));
+                        }
+
+                        if (req.captures < it->second.captures) {
+                            return std::unexpected(Error(
+                                req.addr,
+                                std::format(
+                                    "the closure instantiation captures {} variables while the "
+                                    "procedure needs at least {}",
+                                    req.captures,
+                                    it->second.captures
+                                )
+                            ));
+                        }
+
+                        return {};
+                    },
+
+                    [&](const Call &req) -> std::expected<void, Error> {
+                        if (req.target_addr >= bc_.size()) {
+                            return std::unexpected(Error(
+                                req.addr,
+                                std::format(
+                                    "the call refers to address {:#x}, which is out of bounds for "
+                                    "the bytecode section of size {:#x}",
+                                    req.target_addr,
+                                    bc_.size()
+                                )
+                            ));
+                        }
+
+                        auto it = procs_.find(req.target_addr);
+
+                        if (it == procs_.end()) {
+                            return std::unexpected(Error(
+                                req.addr,
+                                std::format(
+                                    "the call refers to address {:#x}, which is not a procedure "
+                                    "definition",
+                                    req.target_addr
+                                )
+                            ));
+                        }
+
+                        if (it->second.is_closure) {
+                            return std::unexpected(Error(
+                                req.addr,
+                                "a closure cannot be called directly, as the call does not capture "
+                                "variables"
+                            ));
+                        }
+
+                        if (req.args != it->second.params) {
+                            return std::unexpected(Error(
+                                req.addr,
+                                std::format(
+                                    "the call has a wrong number of arguments: the procedure "
+                                    "expects {}, got {}",
+                                    it->second.params,
+                                    req.args
+                                )
+                            ));
+                        }
+
+                        return {};
+                    },
+                },
+                req
             );
 
             if (!r) {
@@ -228,6 +327,7 @@ private:
                      .params = params,
                      .locals = locals,
                      .captures = 0,
+                     .is_closure = instr == Instr::Cbegin,
                  }}
             );
 
@@ -265,6 +365,7 @@ private:
     }
 
     std::expected<void, Error>
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity)
     verify_body_instr(uint32_t addr, uint32_t proc_addr, uint32_t stack_height) {
         if (addr >= bc_.size()) {
             return std::unexpected(Error(
@@ -342,7 +443,107 @@ private:
         };
 
         auto check_varspec = [&](Varspec varspec) -> std::expected<void, Error> {
-            // TODO
+            switch (varspec.kind) {
+            case Varspec::Global:
+                if (varspec.idx >= mod_.global_count) {
+                    return std::unexpected(Error(
+                        varspec.addr,
+                        std::format(
+                            "the global index {} is out of bounds: the module only has {}",
+                            varspec.idx,
+                            mod_.global_count
+                        )
+                    ));
+                }
+
+                return {};
+
+            case Varspec::Local:
+                if (varspec.idx >= proc.locals) {
+                    return std::unexpected(Error(
+                        varspec.addr,
+                        std::format(
+                            "the local index {} is out of bounds: the procedure only has {}",
+                            varspec.idx,
+                            proc.locals
+                        )
+                    ));
+                }
+
+                return {};
+
+            case Varspec::Param:
+                if (varspec.idx >= proc.params) {
+                    return std::unexpected(Error(
+                        varspec.addr,
+                        std::format(
+                            "the parameter index {} is out of bounds: the procedure only has {}",
+                            varspec.idx,
+                            proc.params
+                        )
+                    ));
+                }
+
+                return {};
+
+            case Varspec::Capture:
+                if (varspec.idx >= max_captures) {
+                    return std::unexpected(Error(
+                        varspec.addr,
+                        std::format(
+                            "the captured variable index {} is too large: the maximum is {}",
+                            varspec.idx,
+                            max_captures
+                        )
+                    ));
+                }
+
+                proc.captures = std::max(proc.captures, varspec.idx + 1);
+
+                return {};
+            }
+        };
+
+        auto check_jmp_target = [&](uint32_t l, uint32_t l_addr) -> std::expected<void, Error> {
+            if (l >= bc_.size()) {
+                return std::unexpected(Error(
+                    l_addr,
+                    std::format(
+                        "the jump target {:#x} is out of bounds for the bytecode section of size "
+                        "{:#x}",
+                        l,
+                        bc_.size()
+                    )
+                ));
+            }
+
+            auto instr = bc_[l];
+
+            if (instr == Instr::Begin || instr == Instr::Cbegin) {
+                return std::unexpected(Error(
+                    l_addr,
+                    std::format(
+                        "the jump target {:#x} refers to the beginning of a procedure declaration",
+                        l
+                    )
+                ));
+            }
+
+            if (instr == Instr::Eof) {
+                return std::unexpected(Error(
+                    l_addr, std::format("the jump target {:#x} refers to the end-of-file marker", l)
+                ));
+            }
+
+            to_verify_.emplace_back(
+                l,
+                BodyInstrVerifyReq{
+                    .proc_addr = info.proc_addr,
+                    .stack_height = info.stack_height,
+                }
+            );
+
+            return {};
         };
 
         std::expected<void, Error> r;
@@ -366,7 +567,10 @@ private:
             break;
 
         case Instr::Const:
-            r = check_stack(0, 1);
+            r = read_u32("integer constant", addr, true).and_then([&](auto) {
+                return check_stack(0, 1);
+            });
+
             break;
 
         case Instr::String: {
@@ -617,17 +821,45 @@ private:
         if (instr == Instr::End) {
             to_verify_.emplace_back(addr, TopLevelInstrVerifyReq{.main = false});
         } else if (continue_path) {
-            to_verify_.emplace_back(addr, BodyInstrVerifyReq{
-                .proc_addr = info.proc_addr,
-                .stack_height = info.stack_height,
-            });
+            to_verify_.emplace_back(
+                addr,
+                BodyInstrVerifyReq{
+                    .proc_addr = info.proc_addr,
+                    .stack_height = info.stack_height,
+                }
+            );
         }
 
         return {};
     }
 
-    std::expected<uint32_t, Error> read_u32(std::string_view field, uint32_t &addr) {
-        // TODO
+    std::expected<uint32_t, Error>
+    read_u32(std::string_view field, uint32_t &addr, bool allow_negative = false) {
+        if (-1U - addr <= sizeof(uint32_t) || addr + sizeof(uint32_t) >= bc_.size()) {
+            return std::unexpected(Error(
+                addr,
+                std::format(
+                    "encountered the end of the file unexpectedly while trying to read the {}",
+                    field
+                )
+            ));
+        }
+
+        uint32_t result = 0;
+
+        for (size_t i = 0; i < sizeof(uint32_t); ++i) {
+            result |= static_cast<uint32_t>(bc_[addr + i]) << 8 * i;
+        }
+
+        if (!allow_negative && (result >> 31) != 0) {
+            return std::unexpected(
+                Error(addr, std::format("the value {:#x} is too large for the {}", result, field))
+            );
+        }
+
+        addr += sizeof(uint32_t);
+
+        return result;
     }
 
     struct Varspec {
@@ -638,15 +870,56 @@ private:
             Capture,
         } kind;
 
+        uint32_t addr = 0;
         uint32_t idx = 0;
     };
 
     std::expected<Varspec, Error> read_varspec(uint32_t &addr, bool ignore_hi) {
-        // TODO
-    }
+        constexpr size_t size = 1 + sizeof(uint32_t);
 
-    std::expected<void, Error> check_jmp_target(uint32_t l, uint32_t op_addr) {
-        // TODO
+        if (-1U - addr <= size || addr + size >= bc_.size()) {
+            return std::unexpected(Error(
+                addr,
+                "encountered the end of the file unexpectedly while trying to read a variable "
+                "descriptor"
+            ));
+        }
+
+        auto kind = static_cast<uint8_t>(bc_[addr]);
+        Varspec result{.addr = addr};
+
+        if (ignore_hi) {
+            kind &= 0xf;
+        }
+
+        switch (kind) {
+        case 0:
+            result.kind = Varspec::Global;
+            break;
+
+        case 1:
+            result.kind = Varspec::Local;
+            break;
+
+        case 2:
+            result.kind = Varspec::Param;
+            break;
+
+        case 3:
+            result.kind = Varspec::Capture;
+            break;
+
+        default:
+            return std::unexpected(
+                Error(addr, std::format("unrecognized variable kind encoding: {:#02x}", kind))
+            );
+        }
+
+        for (size_t i = 0; i < sizeof(uint32_t); ++i) {
+            result.idx |= static_cast<uint32_t>(bc_[addr + i + 1]) << 8 * i;
+        }
+
+        return result;
     }
 
     bytecode::Module &mod_;
