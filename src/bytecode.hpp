@@ -37,9 +37,18 @@ enum class Instr : uint8_t {
     Swap = 0x1a, // `SWAP`.
     Elem = 0x1b, // `ELEM`.
 
-    Ld = 0x20, // `LD V(m)`.
-    Lda = 0x30, // `LDA V(m)`.
-    St = 0x40, // `ST V(m)`.
+    LdG = 0x20, // `LD G(m)`.
+    LdL = 0x21, // `LD L(m)`.
+    LdA = 0x22, // `LD A(m)`.
+    LdC = 0x23, // `LD C(m)`.
+    LdaG = 0x30, // `LDA G(m)`.
+    LdaL = 0x31, // `LDA L(m)`.
+    LdaA = 0x32, // `LDA A(m)`.
+    LdaC = 0x33, // `LDA C(m)`.
+    StG = 0x40, // `ST G(m)`.
+    StL = 0x41, // `ST L(m)`.
+    StA = 0x42, // `ST A(m)`.
+    StC = 0x43, // `ST C(m)`.
 
     CjmpZ = 0x50, // `CJMPz l`.
     CjmpNz = 0x51, // `CJMPnz`.

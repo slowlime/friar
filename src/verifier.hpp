@@ -4,6 +4,7 @@
 
 #include <expected>
 #include <string>
+#include <unordered_map>
 
 namespace friar::verifier {
 
@@ -14,6 +15,19 @@ struct Error {
 
     /// The error message.
     std::string msg;
+};
+
+/// The results of bytecode analysis.
+struct ModuleInfo {
+    struct Proc {
+        uint32_t params = 0;
+        uint32_t locals = 0;
+        uint32_t captures = 0;
+        uint32_t stack_size = 0;
+        bool is_closure = false;
+    };
+
+    std::unordered_map<uint32_t, Proc> procs;
 };
 
 /// Statically verifies the module for validity.

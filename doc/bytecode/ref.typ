@@ -1,6 +1,6 @@
 #import "@preview/meander:0.2.4"
 
-#let revision-no = 5
+#let revision-no = 6
 
 #set page(columns: 4, margin: 0.5cm, flipped: true)
 #set columns(gutter: 5pt)
@@ -86,6 +86,8 @@
     The second operand is assigned to the variable.
 
     Pushes the second operand back onto the stack (for chained assignments).
+
+    *Note:* this instruction is never emitted by the Lama compiler.
   ], 2, 1),
 
   (`STA`, `14`, [
@@ -95,6 +97,8 @@
 
     - If its type is a reference to a variable, this operation is equivalent to `STI`.
       In particular, it pops #pops[$2$] operands and pushes #pushes[$1$].
+
+      *Note:* the bytecode emitted by the Lama compiler never triggers this case as it does not contain `LDA` instructions.
 
     - If its type is an integer, this operations pops #pops[$3$] operands and pushes #pushes[$1$].
       The first operand must be an aggregate: an S-expression, an array, or a string.
@@ -139,13 +143,29 @@
 
   ([`LD C(`$m$`)`], [`23 [`$m$`: i32]`], [Pushes the $m$th variable captured by this closure onto the stack.], 0, 1),
 
-  ([`LDA G(`$m$`)`], [`30 [`$m$`: i32]`], [Pushes a reference to the $m$th global onto the stack.], 0, 1),
+  ([`LDA G(`$m$`)`], [`30 [`$m$`: i32]`], [
+    Pushes a reference to the $m$th global onto the stack.
 
-  ([`LDA L(`$m$`)`], [`31 [`$m$`: i32]`], [Pushes a reference to the $m$th local onto the stack.], 0, 1),
+    *Note:* this instruction is never emitted by the Lama compiler.
+  ], 0, 1),
 
-  ([`LDA A(`$m$`)`], [`32 [`$m$`: i32]`], [Pushes a reference to the $m$th function argument onto the stack.], 0, 1),
+  ([`LDA L(`$m$`)`], [`31 [`$m$`: i32]`], [
+    Pushes a reference to the $m$th local onto the stack.
 
-  ([`LDA C(`$m$`)`], [`33 [`$m$`: i32]`], [Pushes a reference to the $m$th variable captured by this closure onto the stack.], 0, 1),
+    *Note:* this instruction is never emitted by the Lama compiler.
+  ], 0, 1),
+
+  ([`LDA A(`$m$`)`], [`32 [`$m$`: i32]`], [
+    Pushes a reference to the $m$th function argument onto the stack.
+
+    *Note:* this instruction is never emitted by the Lama compiler.
+  ], 0, 1),
+
+  ([`LDA C(`$m$`)`], [`33 [`$m$`: i32]`], [
+    Pushes a reference to the $m$th variable captured by this closure onto the stack.
+
+    *Note:* this instruction is never emitted by the Lama compiler.
+  ], 0, 1),
 
   ([`ST G(`$m$`)`], [`40 [`$m$`: i32]`], [
     Stores a value in the $m$th global.
@@ -181,7 +201,7 @@
     Marks the start of a procedure definition with $a$ arguments and $n$ locals.
     When executed, initializes locals to an empty value.
 
-    Unlike `CBEGIN`, the defined procedure cannot use captured variables.
+    Unlike `CBEGIN`, the procedure cannot use captured variables.
   ], 0, 0),
 
   ([`CBEGIN `$a$` `$n$], [`53 [`$a$`: i32] [`$n$`: i32]`], [

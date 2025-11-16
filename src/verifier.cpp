@@ -16,6 +16,7 @@ namespace {
 
 constexpr uint32_t max_stack_height = 0x7fff'ffff;
 constexpr uint32_t max_captures = 0x7fff'ffff;
+constexpr uint32_t max_member_count = 1U << 16;
 
 class Verifier {
 public:
@@ -321,6 +322,10 @@ private:
                 return std::unexpected(std::move(r).error());
             }
 
+            if (main && params != 0) {
+                return std::unexpected(Error(op_addr, "the main function may not have parameters"));
+            }
+
             procs_.insert(
                 {op_addr,
                  ProcInfo{
@@ -487,6 +492,13 @@ private:
                 return {};
 
             case Varspec::Capture:
+                if (!proc.is_closure) {
+                    return std::unexpected(Error(
+                        varspec.addr,
+                        "cannot refer to captured variables in a non-closure procedure"
+                    ));
+                }
+
                 if (varspec.idx >= max_captures) {
                     return std::unexpected(Error(
                         varspec.addr,
@@ -567,9 +579,22 @@ private:
             break;
 
         case Instr::Const:
-            r = read_u32("integer constant", addr, true).and_then([&](auto) {
-                return check_stack(0, 1);
-            });
+            r = read_u32("integer constant", addr, true)
+                    .and_then([&](auto k) -> std::expected<void, Error> {
+                        if (k >= 1 << 30 || k < -(1 << 30)) {
+                            return std::unexpected(Error(
+                                op_addr,
+                                std::format(
+                                    "the constant {} is out of range {}..{}",
+                                    k,
+                                    -(1 << 30),
+                                    (1 << 30) - 1
+                                )
+                            ));
+                        }
+
+                        return check_stack(0, 1);
+                    });
 
             break;
 
@@ -587,19 +612,30 @@ private:
             auto s_addr = addr;
 
             r = read_u32("string table offset", addr).and_then([&](auto s) {
-                return read_u32("sexp member count", addr).and_then([&](auto n) {
-                    return verify_strtab_entry(s, s_addr).and_then([&] {
-                        return check_stack(n, 1);
+                return read_u32("sexp member count", addr)
+                    .and_then([&](auto n) -> std::expected<void, Error> {
+                        if (n > max_member_count) {
+                            return std::unexpected(Error(
+                                op_addr,
+                                std::format(
+                                    "sexp member count ({}) exceeds the maximum of {}",
+                                    n,
+                                    max_member_count
+                                )
+                            ));
+                        }
+
+                        return verify_strtab_entry(s, s_addr).and_then([&] {
+                            return check_stack(n, 1);
+                        });
                     });
-                });
             });
 
             break;
         }
 
         case Instr::Sti:
-            r = check_stack(2, 1);
-            break;
+            return std::unexpected(Error(op_addr, "the STI instruction is not supported"));
 
         case Instr::Sta:
             r = check_stack(3, 1);
@@ -619,7 +655,7 @@ private:
         case Instr::End:
         case Instr::Ret:
             continue_path = false;
-            r = check_stack(1, 1);
+            r = check_stack(1, 0);
             break;
 
         case Instr::Drop:
@@ -638,15 +674,26 @@ private:
             r = check_stack(2, 1);
             break;
 
-        case Instr::Ld:
-        case Instr::Lda:
+        case Instr::LdG:
+        case Instr::LdL:
+        case Instr::LdA:
+        case Instr::LdC:
             r = read_varspec(--addr, true).and_then(check_varspec).and_then([&] {
                 return check_stack(0, 1);
             });
 
             break;
 
-        case Instr::St:
+        case Instr::LdaG:
+        case Instr::LdaL:
+        case Instr::LdaA:
+        case Instr::LdaC:
+            return std::unexpected(Error(op_addr, "the LDA instruction is not supported"));
+
+        case Instr::StG:
+        case Instr::StL:
+        case Instr::StA:
+        case Instr::StC:
             r = read_varspec(--addr, true).and_then(check_varspec).and_then([&] {
                 return check_stack(1, 1);
             });
@@ -811,6 +858,15 @@ private:
             return std::unexpected(Error(
                 op_addr,
                 "encountered an unexpected end-of-file marker inside a procedure definition"
+            ));
+
+        default:
+            return std::unexpected(Error(
+                op_addr,
+                std::format(
+                    "encountered an unexpected byte {:#02x} in the bytecode section",
+                    static_cast<uint8_t>(instr)
+                )
             ));
         }
 
