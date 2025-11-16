@@ -1,4 +1,5 @@
 #include "loader.hpp"
+#include "src/util.hpp"
 
 #include <bit>
 #include <cerrno>
@@ -10,14 +11,6 @@
 
 using namespace friar::bytecode;
 using namespace friar::loader;
-
-namespace {
-
-std::error_code get_last_error() noexcept {
-    return std::make_error_code(std::errc(errno));
-}
-
-} // namespace
 
 Loader::Loader(std::string name, std::istream &s) : mod_{.name = std::move(name)}, s_(s) {}
 
@@ -39,8 +32,7 @@ Loader::Error Loader::make_error(std::string msg, size_t pos) noexcept {
 Loader::Error Loader::make_eof_error(std::string_view field, size_t bytes_missing) {
     return make_error(
         std::format(
-            "encountered an unexpected end of file while parsing {}: need {} more "
-            "bytes",
+            "encountered an unexpected end of file while parsing {}: need {} more bytes",
             field,
             bytes_missing
         ),
@@ -55,7 +47,7 @@ Loader::load_bytes(std::string_view field, std::span<std::byte> dst, bool allow_
     size_t read_count = s_.gcount();
     pos_ += read_count;
 
-    if (auto err = get_last_error(); !err) {
+    if (auto err = util::get_last_error(); err) {
         return std::unexpected(make_error(
             std::format("encountered a failure while parsing {}: {}", field, err.message()), pos_
         ));

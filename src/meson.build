@@ -4,4 +4,5 @@ src += files(
   'loader.cpp',
   'main.cpp',
   'verifier.cpp',
+  'util.cpp',
 )

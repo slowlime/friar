@@ -31,6 +31,6 @@ struct ModuleInfo {
 };
 
 /// Statically verifies the module for validity.
-std::expected<void, Error> verify(bytecode::Module &mod);
+std::expected<ModuleInfo, Error> verify(bytecode::Module &mod);
 
 } // namespace friar::verifier

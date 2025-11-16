@@ -20,6 +20,10 @@ using bytecode::Instr;
 extern void *__gc_stack_top; // NOLINT(bugprone-reserved-identifier)
 extern void *__gc_stack_bottom; // NOLINT(bugprone-reserved-identifier)
 
+// dunno what these are intended for, but it doesn't like otherwise.
+extern const size_t __start_custom_data = 0; // NOLINT(bugprone-reserved-identifier)
+extern const size_t __stop_custom_data = 0; // NOLINT(bugprone-reserved-identifier)
+
 namespace {
 
 constexpr uint32_t max_stack_size = 0x7fff'ffffU;
@@ -108,24 +112,24 @@ public:
         return !UNBOXED(repr_);
     }
 
-    lama_type lama_type() const noexcept {
+    lama_type get_type() const noexcept {
         return get_type_header_ptr(unbox());
     }
 
     bool is_closure() const noexcept {
-        return is_boxed() && lama_type() == CLOSURE;
+        return is_boxed() && get_type() == CLOSURE;
     }
 
     bool is_sexp() const noexcept {
-        return is_boxed() && lama_type() == SEXP;
+        return is_boxed() && get_type() == SEXP;
     }
 
     bool is_string() const noexcept {
-        return is_boxed() && lama_type() == STRING;
+        return is_boxed() && get_type() == STRING;
     }
 
     bool is_array() const noexcept {
-        return is_boxed() && lama_type() == ARRAY;
+        return is_boxed() && get_type() == ARRAY;
     }
 
     bool is_aggregate() const noexcept {
@@ -133,7 +137,7 @@ public:
             return false;
         }
 
-        switch (lama_type()) {
+        switch (get_type()) {
         case ARRAY:
         case STRING:
         case SEXP:
@@ -142,6 +146,8 @@ public:
         case CLOSURE:
             return false;
         }
+
+        std::unreachable();
     }
 
     ValuePtr field(size_t idx) const noexcept;
@@ -163,7 +169,7 @@ public:
             return "integer";
         }
 
-        switch (lama_type()) {
+        switch (get_type()) {
         case ARRAY:
             return "array";
 
@@ -176,6 +182,8 @@ public:
         case SEXP:
             return "sexp";
         }
+
+        std::unreachable();
     }
 
     std::string stringify() const noexcept {
@@ -246,7 +254,7 @@ void Value::stringify_to(std::ostream &s) const noexcept {
     if (is_int()) {
         s << get_aint();
     } else {
-        switch (lama_type()) {
+        switch (get_type()) {
         case ARRAY: {
             auto n = len();
             s << "[";
@@ -698,13 +706,13 @@ enter_frame: {
             auto idx = idx_v.get().get_aint();
             auto *aggregate_data = aggregate_v.get().to_data();
 
-            if (auto len = LEN(aggregate_data->data_header); idx < 0 || idx >= len) [[unlikely]] {
+            if (aint len = LEN(aggregate_data->data_header); idx < 0 || idx >= len) [[unlikely]] {
                 return std::unexpected(
                     make_error("index {} out of range for an aggregate of length {}", idx, len)
                 );
             }
 
-            switch (aggregate_v.get().lama_type()) {
+            switch (aggregate_v.get().get_type()) {
             case ARRAY:
             case STRING:
                 get_object_field(aggregate_data, static_cast<size_t>(idx)) = v;
@@ -738,7 +746,7 @@ enter_frame: {
             __gc_stack_bottom =
                 static_cast<void *>(static_cast<auint *>(__gc_stack_top) + base - args);
 
-            if (frame.saved_pc == -1) [[unlikely]] {
+            if (frame.saved_pc == -1U) [[unlikely]] {
                 return {};
             }
 
@@ -790,7 +798,7 @@ enter_frame: {
             auto idx = idx_v.get().get_aint();
             auto *aggregate_data = aggregate_v.get().to_data();
 
-            if (auto len = LEN(aggregate_data->data_header); idx < 0 || idx >= len) [[unlikely]] {
+            if (aint len = LEN(aggregate_data->data_header); idx < 0 || idx >= len) [[unlikely]] {
                 return std::unexpected(
                     make_error("index {} out of range for an aggregate of length {}", idx, len)
                 );
@@ -798,7 +806,7 @@ enter_frame: {
 
             pop_n(2);
 
-            switch (aggregate_v.get().lama_type()) {
+            switch (aggregate_v.get().get_type()) {
             case ARRAY:
             case STRING:
                 push(get_object_field(aggregate_data, static_cast<size_t>(idx)));
@@ -1139,7 +1147,7 @@ enter_frame: {
 
             aint len = 0;
 
-            switch (v.lama_type()) {
+            switch (v.get_type()) {
             case ARRAY:
             case STRING:
             case SEXP:

@@ -24,10 +24,26 @@ public:
         verified_.resize(mod_.bytecode.size());
     }
 
-    std::expected<void, Error> verify() {
+    std::expected<ModuleInfo, Error> verify() {
         compute_last_strtab_entry();
 
-        return verify_symtab().and_then([this] { return verify_bytecode(); });
+        if (auto r = verify_symtab().and_then([this] { return verify_bytecode(); }); !r) {
+            return std::unexpected(std::move(r).error());
+        }
+
+        ModuleInfo result;
+
+        for (auto &[addr, info] : procs_) {
+            result.procs[addr] = ModuleInfo::Proc {
+                .params = info.params,
+                .locals = info.locals,
+                .captures = info.captures,
+                .stack_size = info.stack_size,
+                .is_closure = info.is_closure,
+            };
+        }
+
+        return result;
     }
 
 private:
@@ -992,7 +1008,7 @@ private:
 
 namespace friar::verifier {
 
-std::expected<void, Error> verify(bytecode::Module &mod) {
+std::expected<ModuleInfo, Error> verify(bytecode::Module &mod) {
     return Verifier(mod).verify();
 }
 
