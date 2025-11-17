@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstring>
 #include <format>
+#include <iostream>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -17,12 +18,8 @@ using namespace friar;
 
 using bytecode::Instr;
 
-extern void *__gc_stack_top; // NOLINT(bugprone-reserved-identifier)
-extern void *__gc_stack_bottom; // NOLINT(bugprone-reserved-identifier)
-
-// dunno what these are intended for, but it doesn't like otherwise.
-extern const size_t __start_custom_data = 0; // NOLINT(bugprone-reserved-identifier)
-extern const size_t __stop_custom_data = 0; // NOLINT(bugprone-reserved-identifier)
+extern "C" void *__gc_stack_top; // NOLINT(bugprone-reserved-identifier)
+extern "C" void *__gc_stack_bottom; // NOLINT(bugprone-reserved-identifier)
 
 namespace {
 
@@ -46,16 +43,23 @@ private:
 
 std::atomic<bool> UniqueRunnerGuard::running = false;
 
+class GcGuard {
+public:
+    GcGuard() noexcept {
+        __init();
+    }
+
+    ~GcGuard() noexcept {
+        __shutdown();
+    }
+};
+
 constexpr auint unboxed_contents = static_cast<auint>(-1) >> 1;
 
 class ValuePtr;
 
 class Value {
 public:
-    static Value from_boxed_ptr(void *p) {
-        return Value(reinterpret_cast<auint>(p));
-    }
-
     static Value from_repr(auint repr) {
         return Value(repr);
     }
@@ -70,19 +74,19 @@ public:
             shifted |= static_cast<auint>(1) << (sizeof(auint) * 8 - 1);
         };
 
-        return Value(shifted);
+        return Value(shifted | 1);
     }
 
     static Value from_int(auint v) {
-        return Value(v << 1);
+        return Value(BOX(v));
     }
 
     static Value from_bool(bool v) {
-        return Value(v ? 1 : 0);
+        return Value(v ? BOX(1) : BOX(0));
     }
 
-    static Value box(void *v) {
-        return Value(BOX(v));
+    static Value from_ptr(void *p) {
+        return Value(reinterpret_cast<auint>(p));
     }
 
     constexpr Value() noexcept = default;
@@ -99,9 +103,9 @@ public:
         return repr_ >> 1;
     }
 
-    void *unbox() const noexcept {
+    void *get_ptr() const noexcept {
         // NOLINTNEXTLINE(performance-no-int-to-ptr)
-        return reinterpret_cast<void *>(UNBOX(repr_));
+        return reinterpret_cast<void *>(repr_);
     }
 
     bool is_int() const noexcept {
@@ -113,7 +117,7 @@ public:
     }
 
     lama_type get_type() const noexcept {
-        return get_type_header_ptr(unbox());
+        return get_type_header_ptr(get_obj_header_ptr(get_ptr()));
     }
 
     bool is_closure() const noexcept {
@@ -153,11 +157,11 @@ public:
     ValuePtr field(size_t idx) const noexcept;
 
     data *to_data() const noexcept {
-        return TO_DATA(unbox());
+        return TO_DATA(get_ptr());
     }
 
     sexp *to_sexp() const noexcept {
-        return TO_SEXP(unbox());
+        return TO_SEXP(get_ptr());
     }
 
     auint len() const noexcept {
@@ -198,7 +202,7 @@ public:
 private:
     explicit Value(auint v) noexcept : repr_(v) {}
 
-    auint repr_ = 0;
+    auint repr_ = BOX(0);
 };
 
 class ValuePtr {
@@ -230,6 +234,10 @@ public:
         *ptr_ = v.to_repr();
     }
 
+    auint *ptr() const noexcept {
+        return ptr_;
+    }
+
 private:
     auint *ptr_ = nullptr;
 };
@@ -247,7 +255,7 @@ ValuePtr get_sexp_field(sexp *p, size_t idx) noexcept {
 }
 
 ValuePtr Value::field(size_t idx) const noexcept {
-    return get_object_field(unbox(), idx);
+    return get_object_field(get_ptr(), idx);
 }
 
 void Value::stringify_to(std::ostream &s) const noexcept {
@@ -299,19 +307,24 @@ Interpreter::Interpreter(
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::expected<void, Interpreter::Error> Interpreter::run() {
-    UniqueRunnerGuard _guard;
+    UniqueRunnerGuard _unique_guard;
 
     std::vector<Frame> frames;
     std::vector<auint> stack;
     const auto *bc = mod_.bytecode.data();
 
-    // globals.
-    stack.resize(mod_.global_count, 0);
+    // globals + 2 dummy `main` arguments.
+    stack.resize(mod_.global_count + 2, BOX(0));
 
     // per-frame registers.
     uint32_t pc = -1;
-    uint32_t base = mod_.global_count;
-    uint32_t args = 0;
+    uint32_t args = 2; // `main` takes 2 arguments.
+    uint32_t base = mod_.global_count + args;
+
+    // initialize the GC (use a virtual stack).
+    __gc_stack_top = static_cast<void *>(stack.data());
+    __gc_stack_bottom = static_cast<void *>(stack.data() + base);
+    GcGuard _gc_guard;
 
     auto read_u32 = [&] {
         auto b0 = static_cast<uint32_t>(bc[pc++]);
@@ -322,7 +335,7 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     };
 
-    auto top_nth = [&](size_t n) {
+    auto top_nth = [&](auto n) {
         return ValuePtr(static_cast<auint *>(__gc_stack_bottom) - static_cast<ptrdiff_t>(n + 1));
     };
 
@@ -331,7 +344,7 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
     };
 
     auto push = [&](Value v) {
-        top_nth(0) = v;
+        top_nth(-1) = v;
         __gc_stack_bottom = static_cast<void *>(static_cast<auint *>(__gc_stack_bottom) + 1);
     };
 
@@ -346,7 +359,7 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
     };
 
     auto capture = [&](uint32_t m) {
-        auto closure = Value::from_repr(static_cast<auint *>(__gc_stack_top)[base + args - 1]);
+        auto closure = Value::from_repr(static_cast<auint *>(__gc_stack_top)[base - args]);
 
         return closure.field(m + 1);
     };
@@ -388,7 +401,7 @@ enter_frame: {
     }
 
     if (stack.size() < new_size) {
-        stack.resize(new_size, 0);
+        stack.resize(new_size, BOX(0));
     }
 
     frames.push_back(
@@ -657,7 +670,7 @@ enter_frame: {
             auto s = read_u32();
             auto sv = mod_.strtab_entry_at(s);
             auto *v = get_object_content_ptr(alloc_string(sv.length() + 1));
-            push(Value::box(v));
+            push(Value::from_ptr(v));
             // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
             strcpy(TO_DATA(v)->contents, sv.data());
 
@@ -676,7 +689,7 @@ enter_frame: {
             }
 
             pop_n(n);
-            push(Value::box(v));
+            push(Value::from_ptr(v));
 
             break;
         }
@@ -931,7 +944,7 @@ enter_frame: {
             auto l = read_u32();
             auto n = read_u32();
             auto *closure = get_object_content_ptr(alloc_closure(n + 1));
-            push(Value::box(closure));
+            push(Value::from_ptr(closure));
             get_object_field(closure, 0) = Value::from_int(static_cast<auint>(l));
 
             for (size_t i = 0; i < n; ++i) {
@@ -1169,7 +1182,7 @@ enter_frame: {
             auto s = v.stringify();
             auto *r = get_object_content_ptr(alloc_string(s.size() + 1));
             pop_n(1);
-            push(Value::box(r));
+            push(Value::from_ptr(r));
             // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
             strcpy(TO_DATA(r)->contents, s.data());
 
@@ -1185,7 +1198,7 @@ enter_frame: {
             }
 
             pop_n(n);
-            push(Value::box(v));
+            push(Value::from_ptr(v));
 
             break;
         }

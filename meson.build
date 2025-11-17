@@ -23,6 +23,7 @@ runtime_dep = cc.find_library(
 executable(
   'friar',
   src,
+  link_args: ['-Wl,--defsym=__start_custom_data=0', '-Wl,--defsym=__stop_custom_data=0'],
   dependencies: [runtime_dep],
   include_directories: include_directories(
     runtime_path,

@@ -34,7 +34,7 @@ public:
         ModuleInfo result;
 
         for (auto &[addr, info] : procs_) {
-            result.procs[addr] = ModuleInfo::Proc {
+            result.procs[addr] = ModuleInfo::Proc{
                 .params = info.params,
                 .locals = info.locals,
                 .captures = info.captures,
@@ -136,7 +136,7 @@ private:
             Body,
             Eof,
             Unknown,
-        } kind;
+        } kind = Unknown;
 
         uint32_t proc_addr = 0;
         uint32_t stack_height = 0;
@@ -338,8 +338,12 @@ private:
                 return std::unexpected(std::move(r).error());
             }
 
-            if (main && params != 0) {
-                return std::unexpected(Error(op_addr, "the main function may not have parameters"));
+            if (main && params != 2) {
+                // why two?????????????? beats me.
+                return std::unexpected(Error(
+                    op_addr,
+                    std::format("the main function must have exactly 2 parameters, got {}", params)
+                ));
             }
 
             procs_.insert(
@@ -357,7 +361,7 @@ private:
                 .proc_addr = op_addr,
             };
 
-            to_verify_.emplace_back(op_addr, BodyInstrVerifyReq{.proc_addr = op_addr});
+            to_verify_.emplace_back(addr, BodyInstrVerifyReq{.proc_addr = op_addr});
 
             break;
         }
@@ -429,7 +433,7 @@ private:
             break;
         }
 
-        auto &proc = procs_[info.proc_addr];
+        auto &proc = procs_.at(proc_addr);
         info.stack_height = stack_height;
         info.proc_addr = proc_addr;
         proc.stack_size = std::max(proc.stack_size, info.stack_height);
@@ -442,8 +446,7 @@ private:
                 return std::unexpected(Error(
                     op_addr,
                     std::format(
-                        "not enough operands on the stack: expected at least "
-                        "{}, have {}",
+                        "not enough operands on the stack: expected at least {}, have {}",
                         pops,
                         info.stack_height
                     )
@@ -530,6 +533,8 @@ private:
 
                 return {};
             }
+
+            std::unreachable();
         };
 
         auto check_jmp_target = [&](uint32_t l, uint32_t l_addr) -> std::expected<void, Error> {
@@ -596,7 +601,7 @@ private:
 
         case Instr::Const:
             r = read_u32("integer constant", addr, true)
-                    .and_then([&](auto k) -> std::expected<void, Error> {
+                    .and_then([&](int32_t k) -> std::expected<void, Error> {
                         if (k >= 1 << 30 || k < -(1 << 30)) {
                             return std::unexpected(Error(
                                 op_addr,
@@ -754,7 +759,7 @@ private:
                 return read_u32("captured variable count", addr).and_then([&](auto n) {
                     std::expected<void, Error> result;
 
-                    while (result) {
+                    for (size_t i = 0; i < n && result; ++i) {
                         result = read_varspec(addr, false).and_then([&](auto varspec) {
                             return check_varspec(varspec);
                         });
@@ -990,6 +995,8 @@ private:
         for (size_t i = 0; i < sizeof(uint32_t); ++i) {
             result.idx |= static_cast<uint32_t>(bc_[addr + i + 1]) << 8 * i;
         }
+
+        addr += size;
 
         return result;
     }
