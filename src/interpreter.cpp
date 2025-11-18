@@ -8,7 +8,6 @@
 #include <format>
 #include <iostream>
 #include <ostream>
-#include <print>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -362,11 +361,6 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
     };
 
     auto push = [&](Value v) {
-        if ((auint *)(__gc_stack_bottom) - (auint *)(__gc_stack_top) >= stack.size()) {
-            std::println(std::cerr, "stack height exceeded (have {})", stack.size());
-            abort();
-        }
-
         top_nth(-1) = v;
         __gc_stack_bottom = static_cast<void *>(static_cast<auint *>(__gc_stack_bottom) + 1);
     };
@@ -1133,10 +1127,13 @@ enter_frame: {
         case Instr::Fail: {
             auto ln = read_u32();
             auto col = read_u32();
+            auto v = *top_nth(0);
             // the scrutinee.
             pop_n(1);
 
-            return std::unexpected(make_error("match failure at L{}:{}", ln, col));
+            return std::unexpected(
+                make_error("match failure for {} at L{}:{}", v.stringify(), ln, col)
+            );
         }
 
         case Instr::Line: {
