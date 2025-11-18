@@ -64,6 +64,9 @@ private:
 
         // the current source line for this frame.
         uint32_t line = 0;
+
+        // `true` if there's a closure object associated with this frame.
+        bool is_closure = false;
     };
 
     bytecode::Module &mod_;

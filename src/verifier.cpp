@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <format>
+#include <iostream>
+#include <print>
 #include <utility>
 #include <variant>
 
@@ -139,7 +141,8 @@ private:
         } kind = Unknown;
 
         uint32_t proc_addr = 0;
-        uint32_t stack_height = 0;
+        uint32_t stack_height_entry = 0;
+        uint32_t stack_height_exit = 0;
     };
 
     struct ProcInfo {
@@ -414,12 +417,12 @@ private:
                 ));
             }
 
-            if (info.stack_height != stack_height) {
+            if (info.stack_height_entry != stack_height) {
                 return std::unexpected(Error(
                     addr,
                     std::format(
                         "detected unbalanced static stack heights: {} and {}",
-                        info.stack_height,
+                        info.stack_height_entry,
                         stack_height
                     )
                 ));
@@ -434,34 +437,38 @@ private:
         }
 
         auto &proc = procs_.at(proc_addr);
-        info.stack_height = stack_height;
+        info.stack_height_entry = info.stack_height_exit = stack_height;
         info.proc_addr = proc_addr;
-        proc.stack_size = std::max(proc.stack_size, info.stack_height);
+        proc.stack_size = std::max(proc.stack_size, info.stack_height_exit);
 
         auto op_addr = addr;
         auto instr = bc_[addr++];
 
+#if 0
+        std::println(std::cerr, "verifying {:#x} (op {:#02x}) at stack height {}", op_addr, uint8_t(instr), info.stack_height_entry);
+#endif
+
         auto check_stack = [&](size_t pops, size_t pushes) -> std::expected<void, Error> {
-            if (info.stack_height < pops) {
+            if (info.stack_height_exit < pops) {
                 return std::unexpected(Error(
                     op_addr,
                     std::format(
                         "not enough operands on the stack: expected at least {}, have {}",
                         pops,
-                        info.stack_height
+                        info.stack_height_exit
                     )
                 ));
             }
 
-            if (max_stack_height - info.stack_height < pushes) {
+            if (max_stack_height - info.stack_height_exit < pushes) {
                 return std::unexpected(Error(
                     op_addr,
                     std::format("exceeded the maximum static stack height of {}", max_stack_height)
                 ));
             }
 
-            info.stack_height += pushes - pops;
-            proc.stack_size = std::max(proc.stack_size, info.stack_height);
+            info.stack_height_exit += pushes - pops;
+            proc.stack_size = std::max(proc.stack_size, info.stack_height_exit);
 
             return {};
         };
@@ -572,7 +579,7 @@ private:
                 l,
                 BodyInstrVerifyReq{
                     .proc_addr = info.proc_addr,
-                    .stack_height = info.stack_height,
+                    .stack_height = info.stack_height_exit,
                 }
             );
 
@@ -725,9 +732,11 @@ private:
         case Instr::CjmpNz: {
             auto l_addr = addr;
 
-            r = read_u32("jump target", addr)
-                    .and_then([&](auto l) { return check_jmp_target(l, l_addr); })
-                    .and_then([&] { return check_stack(1, 0); });
+            r = read_u32("jump target", addr).and_then([&](auto l) {
+                return check_stack(1, 0).and_then([&] {
+                    return check_jmp_target(l, l_addr);
+                });
+            });
 
             break;
         }
@@ -845,6 +854,9 @@ private:
             break;
 
         case Instr::PattEqStr:
+            r = check_stack(2, 1);
+            break;
+
         case Instr::PattString:
         case Instr::PattArray:
         case Instr::PattSexp:
@@ -895,6 +907,8 @@ private:
             return r;
         }
 
+        info.kind = BytecodeInfo::Body;
+
         if (instr == Instr::End) {
             to_verify_.emplace_back(addr, TopLevelInstrVerifyReq{.main = false});
         } else if (continue_path) {
@@ -902,7 +916,7 @@ private:
                 addr,
                 BodyInstrVerifyReq{
                     .proc_addr = info.proc_addr,
-                    .stack_height = info.stack_height,
+                    .stack_height = info.stack_height_exit,
                 }
             );
         }

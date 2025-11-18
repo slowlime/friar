@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+
+set -o pipefail
+
+LAMAC="${LAMAC:-lamac}"
+BUILD_DIR="${BUILD_DIR:-build/regression-tests/}"
+FRIAR="${FRIAR:-build/friar}"
+PROJECT_DIR="$(pwd)"
+
+PASSED=0
+FAILED=0
+
+mkdir -p "$BUILD_DIR"
+
+for FILE_PATH in third-party/lama/regression/test*.lama; do
+	FILE_NAME="$(basename "$FILE_PATH")"
+	STEM="${FILE_NAME%.*}"
+	BC_FILE="$BUILD_DIR/$STEM.bc"
+
+	echo -e "\033[1mRunning $FILE_NAME...\033[m" >&2
+
+	# compile.
+	if ! (
+		set -o pipefail
+		cd "$BUILD_DIR/"
+		"$LAMAC" -b "$PROJECT_DIR/$FILE_PATH"
+
+	); then
+		echo -e "\033[91mcompilation failed!\033[m"
+		continue
+	fi
+
+	# run.
+	INPUT_FILE="third-party/lama/regression/$STEM.input"
+	EXPECTED_OUTPUT="$(tail -n +2 "third-party/lama/regression/$STEM.t" | cut -c 3-)"
+	ACTUAL_OUTPUT="$("$FRIAR" "$BC_FILE" <"$INPUT_FILE" 2>&1 | tee /dev/tty)"
+
+	if ! [ "$EXPECTED_OUTPUT" = "$ACTUAL_OUTPUT" ]; then
+		echo -e "\033[91mtest failed!\033[m expected output:"
+		echo "$EXPECTED_OUTPUT"
+		FAILED=$(($FAILED + 1))
+	else
+		echo -e "\033[92mtest passed\033[m"
+		PASSED=$(($PASSED + 1))
+	fi
+done
+
+echo -e "\033[1mresult: $PASSED passed, $FAILED failed\033[m"

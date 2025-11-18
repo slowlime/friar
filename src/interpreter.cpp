@@ -3,10 +3,12 @@
 #include "runtime.hpp"
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <iostream>
 #include <ostream>
+#include <print>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -285,11 +287,27 @@ void Value::stringify_to(std::ostream &s) const noexcept {
             break;
 
         case STRING:
-            s << to_data()->contents;
+            s << '"' << to_data()->contents << '"';
             break;
 
         case SEXP:
-            s << "<sexp>";
+            s << reinterpret_cast<const char *>(to_sexp()->tag);
+            auto n = len();
+
+            if (n > 0) {
+                s << " (";
+
+                for (size_t i = 0; i < n; ++i) {
+                    if (i > 0) {
+                        s << ", ";
+                    }
+
+                    get_sexp_field(to_sexp(), i).get().stringify_to(s);
+                }
+
+                s << ")";
+            }
+
             break;
         }
     }
@@ -344,6 +362,11 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
     };
 
     auto push = [&](Value v) {
+        if ((auint *)(__gc_stack_bottom) - (auint *)(__gc_stack_top) >= stack.size()) {
+            std::println(std::cerr, "stack height exceeded (have {})", stack.size());
+            abort();
+        }
+
         top_nth(-1) = v;
         __gc_stack_bottom = static_cast<void *>(static_cast<auint *>(__gc_stack_bottom) + 1);
     };
@@ -359,7 +382,7 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
     };
 
     auto capture = [&](uint32_t m) {
-        auto closure = Value::from_repr(static_cast<auint *>(__gc_stack_top)[base - args]);
+        auto closure = Value::from_repr(static_cast<auint *>(__gc_stack_top)[base - args - 1]);
 
         return closure.field(m + 1);
     };
@@ -391,9 +414,21 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
 
     // the address to call.
     uint32_t call_target = 0;
+    bool call_closure = false;
 
 enter_frame: {
+    frames.push_back(
+        Frame{
+            .proc_addr = call_target,
+            .saved_pc = pc,
+            .saved_base = base,
+            .saved_args = args,
+            .is_closure = call_closure,
+        }
+    );
+
     const auto *proc = &info_.procs.at(call_target);
+    base = static_cast<auint *>(__gc_stack_bottom) - static_cast<auint *>(__gc_stack_top);
     auto new_size = static_cast<uint64_t>(base) + proc->locals + proc->stack_size;
 
     if (new_size > max_stack_size) [[unlikely]] {
@@ -404,24 +439,47 @@ enter_frame: {
         stack.resize(new_size, BOX(0));
     }
 
-    frames.push_back(
-        Frame{
-            .proc_addr = call_target,
-            .saved_pc = pc,
-            .saved_base = base,
-            .saved_args = args,
-        }
-    );
-
     pc = call_target;
-    base = static_cast<auint *>(__gc_stack_bottom) - static_cast<auint *>(__gc_stack_top);
-    args = proc->params + static_cast<uint32_t>(proc->is_closure);
+    args = proc->params;
 
     __gc_stack_top = static_cast<void *>(stack.data());
     __gc_stack_bottom = static_cast<void *>(stack.data() + base + proc->locals);
+
+#if 0
+    std::println(
+        std::cerr,
+        "calling {:#x} ({}{} args, {} locals, {} values)",
+        call_target,
+        args,
+        proc->is_closure ? " + 1" : "",
+        proc->locals,
+        proc->stack_size
+    );
+#endif
 }
 
     while (true) {
+#if 0
+        std::print(std::cerr, "[{:#x}] op = {:#02x} stack = [", pc, uint8_t(bc[pc]));
+
+        for (size_t i = 0; i < stack.size(); ++i) {
+            if (__gc_stack_bottom == stack.data() + i) {
+                if (i == 0) {
+                    std::print(std::cerr, "| ");
+                } else {
+                    std::print(std::cerr, " | ");
+                }
+            } else if (i > 0) {
+                std::print(std::cerr, ", ");
+            }
+
+            std::print(std::cerr, "{:#x}", stack[i]);
+            std::print(std::cerr, " ({})", Value::from_repr(stack[i]).type_to_string());
+        }
+
+        std::println(std::cerr, "]");
+#endif
+
         switch (bc[pc++]) {
         case Instr::Add: {
             if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
@@ -669,7 +727,7 @@ enter_frame: {
         case Instr::String: {
             auto s = read_u32();
             auto sv = mod_.strtab_entry_at(s);
-            auto *v = get_object_content_ptr(alloc_string(sv.length() + 1));
+            auto *v = get_object_content_ptr(alloc_string(sv.length()));
             push(Value::from_ptr(v));
             // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
             strcpy(TO_DATA(v)->contents, sv.data());
@@ -685,7 +743,7 @@ enter_frame: {
             TO_SEXP(v)->tag = reinterpret_cast<auint>(tag.data());
 
             for (size_t i = 0; i < n; ++i) {
-                get_object_field(v, i) = *top_nth(n - i - 1);
+                get_sexp_field(TO_SEXP(v), i) = *top_nth(n - i - 1);
             }
 
             pop_n(n);
@@ -700,39 +758,58 @@ enter_frame: {
         }
 
         case Instr::Sta: {
-            auto aggregate_v = top_nth(2);
-            auto idx_v = top_nth(1);
-            auto v = top_nth(0);
+            auto aggregate = *top_nth(2);
+            auto idx_v = *top_nth(1);
+            auto v = *top_nth(0);
 
-            if (!aggregate_v.get().is_aggregate()) [[unlikely]] {
+            if (!aggregate.is_aggregate()) [[unlikely]] {
+                return std::unexpected(make_error("cannot index {}", aggregate.type_to_string()));
+            }
+
+            if (!idx_v.is_int()) [[unlikely]] {
                 return std::unexpected(
-                    make_error("cannot index {}", aggregate_v.get().type_to_string())
+                    make_error("index must be an integer, got {}", idx_v.type_to_string())
                 );
             }
 
-            if (!idx_v.get().is_int()) [[unlikely]] {
-                return std::unexpected(
-                    make_error("index must be an integer, got {}", idx_v.get().type_to_string())
-                );
-            }
+            auto idx = idx_v.get_aint();
+            auto *aggregate_data = aggregate.to_data();
 
-            auto idx = idx_v.get().get_aint();
-            auto *aggregate_data = aggregate_v.get().to_data();
-
-            if (aint len = LEN(aggregate_data->data_header); idx < 0 || idx >= len) [[unlikely]] {
+            if (aint len = static_cast<aint>(aggregate.len()); idx < 0 || idx >= len) [[unlikely]] {
                 return std::unexpected(
                     make_error("index {} out of range for an aggregate of length {}", idx, len)
                 );
             }
 
-            switch (aggregate_v.get().get_type()) {
+            switch (aggregate.get_type()) {
             case ARRAY:
-            case STRING:
                 get_object_field(aggregate_data, static_cast<size_t>(idx)) = v;
                 break;
 
+            case STRING: {
+                if (!v.is_int()) [[unlikely]] {
+                    return std::unexpected(make_error(
+                        "cannot assign {} at index {} into string (expected integer)",
+                        v.type_to_string(),
+                        idx
+                    ));
+                }
+
+                auto c = v.get_aint();
+
+                if (c < 0 || c > 0xff) [[unlikely]] {
+                    return std::unexpected(make_error(
+                        "cannot assign {} at index {} into string: does not fit into a byte", c, idx
+                    ));
+                }
+
+                aggregate_data->contents[idx] = static_cast<char>(c);
+
+                break;
+            }
+
             case SEXP:
-                get_sexp_field(aggregate_v.get().to_sexp(), static_cast<size_t>(idx)) = v;
+                get_sexp_field(aggregate.to_sexp(), static_cast<size_t>(idx)) = v;
                 break;
 
             default:
@@ -756,8 +833,9 @@ enter_frame: {
         case Instr::Ret: {
             auto v = *top_nth(0);
             auto &frame = frames.back();
-            __gc_stack_bottom =
-                static_cast<void *>(static_cast<auint *>(__gc_stack_top) + base - args);
+            __gc_stack_bottom = static_cast<void *>(
+                static_cast<auint *>(__gc_stack_top) + base - args - (frame.is_closure ? 1 : 0)
+            );
 
             if (frame.saved_pc == -1U) [[unlikely]] {
                 return {};
@@ -793,25 +871,23 @@ enter_frame: {
         }
 
         case Instr::Elem: {
-            auto aggregate_v = top_nth(1);
-            auto idx_v = top_nth(0);
+            auto aggregate = *top_nth(1);
+            auto idx_v = *top_nth(0);
 
-            if (!aggregate_v.get().is_aggregate()) [[unlikely]] {
+            if (!aggregate.is_aggregate()) [[unlikely]] {
+                return std::unexpected(make_error("cannot index {}", aggregate.type_to_string()));
+            }
+
+            if (!idx_v.is_int()) [[unlikely]] {
                 return std::unexpected(
-                    make_error("cannot index {}", aggregate_v.get().type_to_string())
+                    make_error("index must be an integer, got {}", idx_v.type_to_string())
                 );
             }
 
-            if (!idx_v.get().is_int()) [[unlikely]] {
-                return std::unexpected(
-                    make_error("index must be an integer, got {}", idx_v.get().type_to_string())
-                );
-            }
+            auto idx = idx_v.get_aint();
+            auto *aggregate_data = aggregate.to_data();
 
-            auto idx = idx_v.get().get_aint();
-            auto *aggregate_data = aggregate_v.get().to_data();
-
-            if (aint len = LEN(aggregate_data->data_header); idx < 0 || idx >= len) [[unlikely]] {
+            if (aint len = static_cast<aint>(aggregate.len()); idx < 0 || idx >= len) [[unlikely]] {
                 return std::unexpected(
                     make_error("index {} out of range for an aggregate of length {}", idx, len)
                 );
@@ -819,14 +895,17 @@ enter_frame: {
 
             pop_n(2);
 
-            switch (aggregate_v.get().get_type()) {
+            switch (aggregate.get_type()) {
             case ARRAY:
-            case STRING:
                 push(get_object_field(aggregate_data, static_cast<size_t>(idx)));
                 break;
 
+            case STRING:
+                push(Value::from_int(static_cast<auint>(aggregate_data->contents[idx])));
+                break;
+
             case SEXP:
-                push(get_sexp_field(aggregate_v.get().to_sexp(), static_cast<size_t>(idx)));
+                push(get_sexp_field(aggregate.to_sexp(), static_cast<size_t>(idx)));
                 break;
 
             default:
@@ -912,6 +991,8 @@ enter_frame: {
                 pc = l;
             }
 
+            pop_n(1);
+
             break;
         }
 
@@ -928,6 +1009,8 @@ enter_frame: {
             if (cond.get_auint() != 0) {
                 pc = l;
             }
+
+            pop_n(1);
 
             break;
         }
@@ -995,6 +1078,7 @@ enter_frame: {
             }
 
             call_target = l;
+            call_closure = true;
 
             goto enter_frame;
         }
@@ -1005,6 +1089,7 @@ enter_frame: {
             read_u32();
 
             call_target = l;
+            call_closure = false;
 
             goto enter_frame;
         }
@@ -1020,7 +1105,7 @@ enter_frame: {
 
             if (v.is_sexp()) {
                 auto *sexp = v.to_sexp();
-                auto actual_tag = mod_.strtab_entry_at(Value::from_repr(sexp->tag).get_auint());
+                auto *actual_tag = reinterpret_cast<char *>(sexp->tag);
 
                 push(Value::from_bool(LEN(sexp->data_header) == n && expected_tag == actual_tag));
             } else {
@@ -1127,6 +1212,7 @@ enter_frame: {
 
         case Instr::CallLread: {
             aint v = 0;
+            output_ << " > " << std::flush;
             input_ >> v;
             push(Value::from_int(v));
 
@@ -1158,19 +1244,7 @@ enter_frame: {
                 );
             }
 
-            aint len = 0;
-
-            switch (v.get_type()) {
-            case ARRAY:
-            case STRING:
-            case SEXP:
-                len = LEN(v.to_data()->data_header);
-                break;
-
-            case CLOSURE:
-                std::unreachable();
-            }
-
+            aint len = static_cast<aint>(v.len());
             pop_n(1);
             push(Value::from_int(len));
 
@@ -1180,7 +1254,7 @@ enter_frame: {
         case Instr::CallLstring: {
             auto v = *top_nth(0);
             auto s = v.stringify();
-            auto *r = get_object_content_ptr(alloc_string(s.size() + 1));
+            auto *r = get_object_content_ptr(alloc_string(s.size()));
             pop_n(1);
             push(Value::from_ptr(r));
             // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
