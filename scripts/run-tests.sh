@@ -6,13 +6,14 @@ LAMAC="${LAMAC:-lamac}"
 BUILD_DIR="${BUILD_DIR:-build/regression-tests/}"
 FRIAR="${FRIAR:-build/friar}"
 PROJECT_DIR="$(pwd)"
+SUITE_DIR="${SUITE_DIR:-"third-party/lama/regression"}"
 
 PASSED=0
 FAILED=0
 
 mkdir -p "$BUILD_DIR"
 
-for FILE_PATH in third-party/lama/regression/test*.lama; do
+for FILE_PATH in "$SUITE_DIR"/*.lama; do
 	FILE_NAME="$(basename "$FILE_PATH")"
 	STEM="${FILE_NAME%.*}"
 	BC_FILE="$BUILD_DIR/$STEM.bc"
