@@ -11,6 +11,9 @@ SUITE_DIR="${SUITE_DIR:-"third-party/lama/regression"}"
 PASSED=0
 FAILED=0
 
+declare -a FAILED_NAMES
+declare -a COMPILE_FAILED_NAMES
+
 mkdir -p "$BUILD_DIR"
 
 for FILE_PATH in "$SUITE_DIR"/*.lama; do
@@ -18,7 +21,7 @@ for FILE_PATH in "$SUITE_DIR"/*.lama; do
 	STEM="${FILE_NAME%.*}"
 	BC_FILE="$BUILD_DIR/$STEM.bc"
 
-	echo -e "\033[1mRunning $FILE_NAME...\033[m" >&2
+	echo -e "\033[1mRunning $FILE_PATH...\033[m" >&2
 
 	# compile.
 	if ! (
@@ -28,18 +31,23 @@ for FILE_PATH in "$SUITE_DIR"/*.lama; do
 
 	); then
 		echo -e "\033[91mcompilation failed!\033[m"
+		COMPILE_FAILED_NAMES+=("$FILE_NAME")
 		continue
 	fi
 
-	# run.
-	INPUT_FILE="third-party/lama/regression/$STEM.input"
-	EXPECTED_OUTPUT="$(tail -n +2 "third-party/lama/regression/$STEM.t" | cut -c 3-)"
+	INPUT_FILE="$SUITE_DIR/$STEM.input"
+
+	# run the reference interpreter.
+	EXPECTED_OUTPUT="$("$LAMAC" -i "$FILE_PATH" <"$INPUT_FILE" 2>&1)"
+
+	# run friar.
 	ACTUAL_OUTPUT="$("$FRIAR" "$BC_FILE" <"$INPUT_FILE" 2>&1 | tee /dev/tty)"
 
 	if ! [ "$EXPECTED_OUTPUT" = "$ACTUAL_OUTPUT" ]; then
 		echo -e "\033[91mtest failed!\033[m expected output:"
 		echo "$EXPECTED_OUTPUT"
 		FAILED=$(($FAILED + 1))
+		FAILED_NAMES+=("$FILE_NAME")
 	else
 		echo -e "\033[92mtest passed\033[m"
 		PASSED=$(($PASSED + 1))
@@ -47,3 +55,11 @@ for FILE_PATH in "$SUITE_DIR"/*.lama; do
 done
 
 echo -e "\033[1mresult: $PASSED passed, $FAILED failed\033[m"
+
+if [[ ${#COMPILE_FAILED_NAMES[@]} -ne 0 ]]; then
+	echo -e "\033[91mcompilation failed for:\033[m ${COMPILE_FAILED_NAMES[@]}"
+fi
+
+if [[ ${#FAILED_NAMES[@]} -ne 0 ]]; then
+	echo -e "\033[91mfailed tests:\033[m ${FAILED_NAMES[@]}"
+fi
