@@ -3,6 +3,6 @@ src += files(
   'interpreter.cpp',
   'loader.cpp',
   'main.cpp',
-  'verifier.cpp',
   'util.cpp',
+  'verifier.cpp',
 )

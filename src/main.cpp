@@ -4,6 +4,7 @@
 
 #include "args.hpp"
 #include "loader.hpp"
+#include "src/decode.hpp"
 #include "src/interpreter.hpp"
 #include "util.hpp"
 #include "verifier.hpp"
@@ -48,6 +49,10 @@ int main(int argc, char **argv) {
 
         return 1;
     }
+
+    // TODO: remove.
+    decode::Decoder decoder(mod->bytecode);
+    decoder.next([&](auto res) {});
 
     interpreter::Interpreter interp(*mod, *mod_info, std::cin, std::cout);
     auto r = interp.run();
