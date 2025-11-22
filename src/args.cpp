@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string_view>
 
 using namespace friar::args;
@@ -10,12 +11,18 @@ using namespace friar::args;
 namespace {
 
 std::string_view usage =
-    "Usage: friar [-h] [--] <input>\n"
+    "Usage: friar [-h] [--mode=MODE] [--] <input>\n"
     "\n"
     "  <input>       A path to the Lama bytecode file to interpret.\n"
     "\n"
     "Options:\n"
-    "  -h, --help    Print this help message.";
+    "  -h, --help    Print this help message.\n"
+    "\n"
+    "  --mode=MODE   Select the execution mode. Available choices:\n"
+    "                - disas: disassemble the bytecode and exit.\n"
+    "                - verify: only perform bytecode verification.\n"
+    "                - idiom: search for bytecode idioms.\n"
+    "                - run: execute the bytecode (default).";
 
 } // namespace
 
@@ -36,6 +43,47 @@ Args Args::parse_or_exit(int argc, char **argv) {
 
                 // NOLINTNEXTLINE(concurrency-mt-unsafe)
                 exit(0);
+            } else if (arg.starts_with("--")) {
+                arg.remove_prefix(2);
+                auto name = arg;
+                std::optional<std::string_view> value;
+
+                if (auto pos = arg.find('='); pos != std::string_view::npos) {
+                    name = arg.substr(0, pos);
+                    value = arg.substr(pos + 1);
+                }
+
+                if (name == "mode") {
+                    if (!value) {
+                        std::println(std::cerr, "--mode requires a value");
+                        std::println(std::cerr, "{}", usage);
+
+                        // NOLINTNEXTLINE(concurrency-mt-unsafe)
+                        exit(2);
+                    }
+
+                    if (value == "disas") {
+                        result.mode = Mode::Disas;
+                    } else if (value == "verify") {
+                        result.mode = Mode::Verify;
+                    } else if (value == "idiom") {
+                        result.mode = Mode::Idiom;
+                    } else if (value == "run") {
+                        result.mode = Mode::Run;
+                    } else {
+                        std::println(std::cerr, "Unrecognized mode: {}", *value);
+                        std::println(std::cerr, "{}", usage);
+
+                        // NOLINTNEXTLINE(concurrency-mt-unsafe)
+                        exit(2);
+                    }
+                } else {
+                    std::println(std::cerr, "Unrecognized option: {}", arg);
+                    std::println(std::cerr, "{}", usage);
+
+                    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+                    exit(2);
+                }
             } else {
                 std::println(std::cerr, "Unrecognized option: {}", arg);
                 std::println(std::cerr, "{}", usage);

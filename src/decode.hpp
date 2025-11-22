@@ -331,6 +331,8 @@ void Decoder::next(const F &listener) {
 
 std::expected<Imm32, Error> Decoder::read_imm32(std::string_view field) {
     if (-1U - pos_ <= sizeof(uint32_t) || pos_ + sizeof(uint32_t) >= bc_.size()) {
+        pos_ = bc_.size();
+
         return std::unexpected(
             Error{
                 .addr = pos_,
@@ -354,6 +356,8 @@ std::expected<Imm32, Error> Decoder::read_imm32(std::string_view field) {
 
 std::expected<ImmVarspec, Error> Decoder::read_imm_varspec(bool ignore_hi) {
     if (-1U - pos_ <= ImmVarspec::len() || pos_ + ImmVarspec::len() >= bc_.size()) {
+        pos_ = bc_.size();
+
         return std::unexpected(
             Error{
                 .addr = pos_,

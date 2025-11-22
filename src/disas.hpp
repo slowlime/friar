@@ -10,7 +10,8 @@ namespace friar::disas {
 
 struct DisasOpts {
     bool print_addr = false;
-    std::string_view instr_sep = "\n";
+    std::string_view instr_term = "\n";
+    std::string_view instr_sep;
 };
 
 void disassemble(std::span<const bytecode::Instr> bc, std::ostream &s, DisasOpts opts = {});

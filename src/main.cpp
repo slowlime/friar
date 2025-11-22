@@ -3,13 +3,52 @@
 #include <variant>
 
 #include "args.hpp"
+#include "disas.hpp"
+#include "idiom.hpp"
+#include "interpreter.hpp"
 #include "loader.hpp"
-#include "src/decode.hpp"
-#include "src/interpreter.hpp"
 #include "util.hpp"
 #include "verifier.hpp"
 
 using namespace friar;
+
+namespace {
+
+int print_disas(const bytecode::Module &mod) {
+    disas::disassemble(
+        mod.bytecode,
+        std::cout,
+        disas::DisasOpts{
+            .print_addr = true,
+        }
+    );
+
+    return 0;
+}
+
+int print_idioms(const bytecode::Module &mod, const verifier::ModuleInfo &mod_info) {
+    auto idioms = idiom::find_idioms(mod, mod_info);
+    auto occur_width =
+        idioms.idioms.empty() ? 1 : util::compute_decimal_width(idioms.idioms.front().occurrences);
+
+    for (auto [instrs, occurrences] : idioms.idioms) {
+        std::print("{:>{}}  ", occurrences, occur_width);
+        disas::disassemble(
+            instrs,
+            std::cout,
+            disas::DisasOpts{
+                .print_addr = false,
+                .instr_term = "",
+                .instr_sep = "; ",
+            }
+        );
+        std::println("");
+    }
+
+    return 0;
+}
+
+} // namespace
 
 int main(int argc, char **argv) {
     auto args = friar::args::Args::parse_or_exit(argc, argv);
@@ -41,6 +80,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    if (args.mode == args::Mode::Disas) {
+        return print_disas(*mod);
+    }
+
     auto mod_info = verifier::verify(*mod);
 
     if (!mod_info) {
@@ -50,9 +93,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // TODO: remove.
-    decode::Decoder decoder(mod->bytecode);
-    decoder.next([&](auto res) {});
+    if (args.mode == args::Mode::Verify) {
+        return 0;
+    }
+
+    if (args.mode == args::Mode::Idiom) {
+        return print_idioms(*mod, *mod_info);
+    }
 
     interpreter::Interpreter interp(*mod, *mod_info, std::cin, std::cout);
     auto r = interp.run();

@@ -15,20 +15,22 @@ void friar::disas::disassemble(
     DisasOpts opts
 ) {
     decode::Decoder decoder(bc);
-
-    size_t width = 1;
-
-    // NOLINTNEXTLINE(readability-braces-around-statements)
-    for (size_t n = 10; n < bc.size_bytes(); width++, n *= 10)
-        ;
+    auto width = util::compute_decimal_width(bc.size_bytes());
+    bool first = true;
 
     while (decoder.pos() < bc.size()) {
         decoder.next([&](const decode::Decoder::Result &result) {
             std::visit(
                 util::overloaded{
                     [&](const decode::InstrStart &start) {
+                        if (!first) {
+                            s << opts.instr_sep;
+                        }
+
+                        first = false;
+
                         if (opts.print_addr) {
-                            std::print(s, "{:>{}x}", start.addr, width);
+                            std::print(s, "{:>{}x}:  ", start.addr, width);
                         }
 
                         switch (start.opcode) {
@@ -255,7 +257,7 @@ void friar::disas::disassemble(
                         }
                     },
 
-                    [&](const decode::InstrEnd &end) { s << opts.instr_sep; },
+                    [&](const decode::InstrEnd &end) { s << opts.instr_term; },
 
                     [&](const decode::Imm32 &imm) { s << " " << imm.imm; },
 
