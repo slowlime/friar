@@ -924,7 +924,7 @@ private:
 
     std::expected<uint32_t, Error>
     read_u32(std::string_view field, uint32_t &addr, bool allow_negative = false) {
-        if (-1U - addr <= sizeof(uint32_t) || addr + sizeof(uint32_t) >= bc_.size()) {
+        if (-1U - addr <= sizeof(uint32_t) || addr + sizeof(uint32_t) > bc_.size()) {
             return std::unexpected(Error(
                 addr,
                 std::format(
@@ -966,7 +966,7 @@ private:
     std::expected<Varspec, Error> read_varspec(uint32_t &addr, bool ignore_hi) {
         constexpr size_t size = 1 + sizeof(uint32_t);
 
-        if (-1U - addr <= size || addr + size >= bc_.size()) {
+        if (-1U - addr <= size || addr + size > bc_.size()) {
             return std::unexpected(Error(
                 addr,
                 "encountered the end of the file unexpectedly while trying to read a variable "
