@@ -10,7 +10,7 @@
 #include <utility>
 #include <variant>
 
-#include "src/bytecode.hpp"
+#include "bytecode.hpp"
 
 namespace friar::decode {
 
@@ -114,7 +114,7 @@ class Decoder {
 public:
     using Result = std::variant<InstrStart, InstrEnd, Imm32, ImmVarspec, Error>;
 
-    explicit Decoder(std::span<bytecode::Instr> bytecode) : bc_(bytecode) {}
+    explicit Decoder(std::span<const bytecode::Instr> bytecode) : bc_(bytecode) {}
 
     void move_to(uint32_t addr) {
         pos_ = addr;
@@ -134,7 +134,7 @@ private:
     inline std::expected<Imm32, Error> read_imm32(std::string_view field);
     inline std::expected<ImmVarspec, Error> read_imm_varspec(bool ignore_hi);
 
-    std::span<bytecode::Instr> bc_;
+    std::span<const bytecode::Instr> bc_;
     uint32_t pos_ = 0;
 };
 
