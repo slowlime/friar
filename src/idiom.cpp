@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -184,7 +183,12 @@ Idioms friar::idiom::find_idioms(const bytecode::Module &mod, const verifier::Mo
         idioms.emplace_back(span, n);
     }
 
-    std::ranges::sort(idioms, std::greater{}, [](const Idiom &idiom) { return idiom.occurrences; });
+    std::ranges::sort(idioms, [](const Idiom &lhs, const Idiom &rhs) {
+        auto occur_ord = lhs.occurrences <=> rhs.occurrences;
+
+        return occur_ord > 0 ||
+               (occur_ord == 0 && std::ranges::lexicographical_compare(lhs.instrs, rhs.instrs));
+    });
 
     return {.idioms = std::move(idioms)};
 }
