@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <print>
 #include <string_view>
 
 using namespace friar::args;
@@ -38,7 +39,7 @@ Args Args::parse_or_exit(int argc, char **argv) {
         if (!positional_only && arg == "--") {
             positional_only = true;
         } else if (!positional_only && arg.starts_with('-')) {
-            if (arg == "-h" && arg == "--help") {
+            if (arg == "-h" || arg == "--help") {
                 std::println(std::cerr, "{}", usage);
 
                 // NOLINTNEXTLINE(concurrency-mt-unsafe)
