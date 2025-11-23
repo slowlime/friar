@@ -118,10 +118,6 @@ find_split_points(const bytecode::Module &mod, const verifier::ModuleInfo &info)
                 }
             });
         }
-
-        if (should_split_after(start.opcode)) {
-            split_at.insert(end.addr);
-        }
     });
 
     return split_at;
@@ -159,7 +155,7 @@ Idioms friar::idiom::find_idioms(const bytecode::Module &mod, const verifier::Mo
         mod, info, [&](const decode::InstrStart &start, const decode::InstrEnd &end) {
             occurrences[get_span(end)] += 1;
 
-            if (!split_points.contains(end.addr)) {
+            if (!split_points.contains(end.addr) && !should_split_after(start.opcode)) {
                 decoder.move_to(end.addr);
                 decode::InstrEnd next_end;
 
