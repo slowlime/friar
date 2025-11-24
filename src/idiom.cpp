@@ -54,21 +54,17 @@ bool should_split_after(Instr instr) noexcept {
     }
 }
 
-template<class F>
-void walk_reachable_instrs(
-    const bytecode::Module &mod,
-    const verifier::ModuleInfo &info,
-    const F &callback
-) {
+std::vector<bool>
+find_reachable_instrs(const bytecode::Module &mod, const verifier::ModuleInfo &info) {
     decode::Decoder decoder(mod.bytecode);
     std::vector<uint32_t> to_process;
-    std::vector<bool> processed(mod.bytecode.size());
-
+    std::vector<bool> reachable(mod.bytecode.size());
     to_process.reserve(info.procs.size());
 
     auto enqueue_to_process = [&](uint32_t addr) {
-        if (!processed[addr]) {
+        if (!reachable[addr]) {
             to_process.push_back(addr);
+            reachable[addr] = true;
         }
     };
 
@@ -79,7 +75,6 @@ void walk_reachable_instrs(
     while (!to_process.empty()) {
         auto addr = to_process.back();
         to_process.pop_back();
-        processed[addr] = true;
 
         decoder.move_to(addr);
         decode::InstrStart start;
@@ -96,20 +91,49 @@ void walk_reachable_instrs(
             }
         });
 
-        callback(start, end);
-
         if (!is_terminal(start.opcode)) {
             enqueue_to_process(end.addr);
         }
     }
+
+    return reachable;
 }
 
-std::vector<bool> find_split_points(const bytecode::Module &mod, const verifier::ModuleInfo &info) {
-    std::vector<bool> split_at;
+template<class F>
+void walk_reachable_instrs(
+    const bytecode::Module &mod,
+    const std::vector<bool> &reachable,
+    const F &callback
+) {
     decode::Decoder decoder(mod.bytecode);
-    split_at.reserve(mod.bytecode.size());
 
-    walk_reachable_instrs(mod, info, [&](const auto &start, const auto &end) {
+    for (auto it = reachable.begin();
+         it = std::find(it, reachable.end(), true), it != reachable.end();
+         ++it) {
+
+        uint32_t addr = it - reachable.begin();
+        decoder.move_to(addr);
+        decode::InstrStart start;
+        decode::InstrEnd end;
+
+        decoder.next([&](const decode::Decoder::Result &result) {
+            if (const auto *r = std::get_if<decode::InstrStart>(&result)) {
+                start = *r;
+            } else if (const auto *r = std::get_if<decode::InstrEnd>(&result)) {
+                end = *r;
+            }
+        });
+
+        callback(start, end);
+    }
+}
+
+std::vector<bool>
+find_split_points(const bytecode::Module &mod, const std::vector<bool> &reachable) {
+    std::vector<bool> split_at(mod.bytecode.size());
+    decode::Decoder decoder(mod.bytecode);
+
+    walk_reachable_instrs(mod, reachable, [&](const auto &start, const auto &end) {
         if (is_jump(start.opcode)) {
             decoder.move_to(start.addr);
             decoder.next([&](const decode::Decoder::Result &result) {
@@ -148,11 +172,12 @@ Idioms friar::idiom::find_idioms(const bytecode::Module &mod, const verifier::Mo
         return std::span(mod.bytecode).subspan(end.start, end.len());
     };
 
-    auto split_points = find_split_points(mod, info);
+    auto reachable = find_reachable_instrs(mod, info);
+    auto split_points = find_split_points(mod, reachable);
     decode::Decoder decoder(mod.bytecode);
 
     walk_reachable_instrs(
-        mod, info, [&](const decode::InstrStart &start, const decode::InstrEnd &end) {
+        mod, reachable, [&](const decode::InstrStart &start, const decode::InstrEnd &end) {
             occurrences[get_span(end)] += 1;
 
             if (!split_points[end.addr] && !should_split_after(start.opcode)) {
