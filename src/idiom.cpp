@@ -54,12 +54,18 @@ bool should_split_after(Instr instr) noexcept {
     }
 }
 
-std::vector<bool>
-find_reachable_instrs(const bytecode::Module &mod, const verifier::ModuleInfo &info) {
+struct Reachability {
+    std::vector<bool> reachable;
+    std::vector<bool> jump_targets;
+};
+
+Reachability find_reachable_instrs(const bytecode::Module &mod, const verifier::ModuleInfo &info) {
     decode::Decoder decoder(mod.bytecode);
     std::vector<uint32_t> to_process;
-    std::vector<bool> reachable(mod.bytecode.size());
     to_process.reserve(info.procs.size());
+
+    std::vector<bool> reachable(mod.bytecode.size());
+    std::vector<bool> jump_targets(mod.bytecode.size());
 
     auto enqueue_to_process = [&](uint32_t addr) {
         if (!reachable[addr]) {
@@ -88,6 +94,7 @@ find_reachable_instrs(const bytecode::Module &mod, const verifier::ModuleInfo &i
             } else if (const auto *r = std::get_if<decode::Imm32>(&result);
                        r && is_jump(start.opcode)) {
                 enqueue_to_process(r->imm);
+                jump_targets[r->imm] = true;
             }
         });
 
@@ -96,7 +103,10 @@ find_reachable_instrs(const bytecode::Module &mod, const verifier::ModuleInfo &i
         }
     }
 
-    return reachable;
+    return {
+        .reachable = std::move(reachable),
+        .jump_targets = std::move(jump_targets),
+    };
 }
 
 template<class F>
@@ -128,25 +138,6 @@ void walk_reachable_instrs(
     }
 }
 
-std::vector<bool>
-find_split_points(const bytecode::Module &mod, const std::vector<bool> &reachable) {
-    std::vector<bool> split_at(mod.bytecode.size());
-    decode::Decoder decoder(mod.bytecode);
-
-    walk_reachable_instrs(mod, reachable, [&](const auto &start, const auto &end) {
-        if (is_jump(start.opcode)) {
-            decoder.move_to(start.addr);
-            decoder.next([&](const decode::Decoder::Result &result) {
-                if (const auto *r = std::get_if<decode::Imm32>(&result)) {
-                    split_at[r->imm] = true;
-                }
-            });
-        }
-    });
-
-    return split_at;
-}
-
 } // namespace
 
 Idioms friar::idiom::find_idioms(const bytecode::Module &mod, const verifier::ModuleInfo &info) {
@@ -172,15 +163,14 @@ Idioms friar::idiom::find_idioms(const bytecode::Module &mod, const verifier::Mo
         return std::span(mod.bytecode).subspan(end.start, end.len());
     };
 
-    auto reachable = find_reachable_instrs(mod, info);
-    auto split_points = find_split_points(mod, reachable);
+    auto [reachable, jump_targets] = find_reachable_instrs(mod, info);
     decode::Decoder decoder(mod.bytecode);
 
     walk_reachable_instrs(
         mod, reachable, [&](const decode::InstrStart &start, const decode::InstrEnd &end) {
             occurrences[get_span(end)] += 1;
 
-            if (!split_points[end.addr] && !should_split_after(start.opcode)) {
+            if (!jump_targets[end.addr] && !should_split_after(start.opcode)) {
                 decoder.move_to(end.addr);
                 decode::InstrEnd next_end;
 
