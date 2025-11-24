@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -67,18 +66,19 @@ void walk_reachable_instrs(
 
     to_process.reserve(info.procs.size());
 
+    auto enqueue_to_process = [&](uint32_t addr) {
+        if (!processed[addr]) {
+            to_process.push_back(addr);
+        }
+    };
+
     for (const auto &[addr, _] : info.procs) {
-        to_process.push_back(addr);
+        enqueue_to_process(addr);
     }
 
     while (!to_process.empty()) {
         auto addr = to_process.back();
         to_process.pop_back();
-
-        if (processed[addr]) {
-            continue;
-        }
-
         processed[addr] = true;
 
         decoder.move_to(addr);
@@ -92,29 +92,29 @@ void walk_reachable_instrs(
                 end = *r;
             } else if (const auto *r = std::get_if<decode::Imm32>(&result);
                        r && is_jump(start.opcode)) {
-                to_process.push_back(r->imm);
+                enqueue_to_process(r->imm);
             }
         });
 
         callback(start, end);
 
         if (!is_terminal(start.opcode)) {
-            to_process.push_back(end.addr);
+            enqueue_to_process(end.addr);
         }
     }
 }
 
-std::unordered_set<uint32_t>
-find_split_points(const bytecode::Module &mod, const verifier::ModuleInfo &info) {
-    std::unordered_set<uint32_t> split_at;
+std::vector<bool> find_split_points(const bytecode::Module &mod, const verifier::ModuleInfo &info) {
+    std::vector<bool> split_at;
     decode::Decoder decoder(mod.bytecode);
+    split_at.reserve(mod.bytecode.size());
 
     walk_reachable_instrs(mod, info, [&](const auto &start, const auto &end) {
         if (is_jump(start.opcode)) {
             decoder.move_to(start.addr);
             decoder.next([&](const decode::Decoder::Result &result) {
                 if (const auto *r = std::get_if<decode::Imm32>(&result)) {
-                    split_at.insert(r->imm);
+                    split_at[r->imm] = true;
                 }
             });
         }
@@ -155,7 +155,7 @@ Idioms friar::idiom::find_idioms(const bytecode::Module &mod, const verifier::Mo
         mod, info, [&](const decode::InstrStart &start, const decode::InstrEnd &end) {
             occurrences[get_span(end)] += 1;
 
-            if (!split_points.contains(end.addr) && !should_split_after(start.opcode)) {
+            if (!split_points[end.addr] && !should_split_after(start.opcode)) {
                 decoder.move_to(end.addr);
                 decode::InstrEnd next_end;
 
