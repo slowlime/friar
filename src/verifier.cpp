@@ -14,8 +14,9 @@ using util::overloaded;
 
 namespace {
 
-constexpr uint32_t max_stack_height = 0x7fff'ffff;
+constexpr uint32_t max_stack_height = 0xffff;
 constexpr uint32_t max_captures = 0x7fff'ffff;
+constexpr uint32_t max_param_count = 0xffff;
 constexpr uint32_t max_member_count = 1U << 16;
 
 class Verifier {
@@ -344,6 +345,17 @@ private:
                 return std::unexpected(Error(
                     op_addr,
                     std::format("the main function must have exactly 2 parameters, got {}", params)
+                ));
+            }
+
+            if (params > max_param_count) {
+                return std::unexpected(Error(
+                    op_addr,
+                    std::format(
+                        "a function has too many parameters: expected at most {}, got {}",
+                        max_param_count,
+                        params
+                    )
                 ));
             }
 
@@ -731,9 +743,7 @@ private:
             auto l_addr = addr;
 
             r = read_u32("jump target", addr).and_then([&](auto l) {
-                return check_stack(1, 0).and_then([&] {
-                    return check_jmp_target(l, l_addr);
-                });
+                return check_stack(1, 0).and_then([&] { return check_jmp_target(l, l_addr); });
             });
 
             break;
