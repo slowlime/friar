@@ -20,6 +20,15 @@ runtime_dep = cc.find_library(
   header_include_directories: include_directories(runtime_path),
 )
 
+conf_data = configuration_data()
+conf_data.set('PROC_ADDR_VERIFICATION', get_option('proc_addr_verification'))
+
+configure_file(
+  input: 'src/config.hpp.in',
+  output: 'config.hpp',
+  configuration: conf_data,
+)
+
 executable(
   'friar',
   src,

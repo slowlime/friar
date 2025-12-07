@@ -1,10 +1,13 @@
 #include "verifier.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <format>
+#include <span>
 #include <utility>
 #include <variant>
 
+#include "config.hpp"
 #include "util.hpp"
 
 using namespace friar;
@@ -17,7 +20,7 @@ namespace {
 constexpr uint32_t max_stack_height = 0xffff;
 constexpr uint32_t max_captures = 0x7fff'ffff;
 constexpr uint32_t max_param_count = 0xffff;
-constexpr uint32_t max_member_count = 1U << 16;
+constexpr uint32_t max_member_count = 0xffff;
 
 class Verifier {
 public:
@@ -117,9 +120,7 @@ private:
         return {};
     }
 
-    struct TopLevelInstrVerifyReq {
-        bool main = false;
-    };
+    struct TopLevelInstrVerifyReq {};
 
     struct BodyInstrVerifyReq {
         uint32_t proc_addr = 0;
@@ -132,6 +133,10 @@ private:
     };
 
     struct BytecodeInfo {
+#ifdef PROC_ADDR_VERIFICATION
+        uint32_t proc_addr = 0;
+#endif
+
         enum Kind : uint8_t {
             Proc,
             Body,
@@ -139,16 +144,14 @@ private:
             Unknown,
         } kind = Unknown;
 
-        uint32_t proc_addr = 0;
-        uint32_t stack_height_entry = 0;
-        uint32_t stack_height_exit = 0;
+        uint16_t stack_height_entry = 0;
     };
 
     struct ProcInfo {
         uint32_t params = 0;
         uint32_t locals = 0;
         uint32_t captures = 0;
-        uint32_t stack_size = 0;
+        uint16_t stack_size = 0;
         bool is_closure = false;
     };
 
@@ -175,7 +178,7 @@ private:
             auto r = std::visit(
                 overloaded{
                     [&](TopLevelInstrVerifyReq &kind) {
-                        return verify_top_level_instr(req.addr, kind.main);
+                        return verify_top_level_instr(req.addr, req.addr == 0);
                     },
                     [&](BodyInstrVerifyReq &kind) {
                         return verify_body_instr(req.addr, kind.proc_addr, kind.stack_height);
@@ -370,8 +373,10 @@ private:
             );
 
             verified_[op_addr] = BytecodeInfo{
-                .kind = BytecodeInfo::Proc,
+#ifdef PROC_ADDR_VERIFICATION
                 .proc_addr = op_addr,
+#endif
+                .kind = BytecodeInfo::Proc,
             };
 
             to_verify_.emplace_back(addr, BodyInstrVerifyReq{.proc_addr = op_addr});
@@ -415,6 +420,7 @@ private:
 
         switch (info.kind) {
         case BytecodeInfo::Body:
+#ifdef PROC_ADDR_VERIFICATION
             if (info.proc_addr != proc_addr) {
                 return std::unexpected(Error(
                     addr,
@@ -426,6 +432,7 @@ private:
                     )
                 ));
             }
+#endif
 
             if (info.stack_height_entry != stack_height) {
                 return std::unexpected(Error(
@@ -447,9 +454,11 @@ private:
         }
 
         auto &proc = procs_.at(proc_addr);
-        info.stack_height_entry = info.stack_height_exit = stack_height;
+        auto stack_height_exit = info.stack_height_entry = stack_height;
+#ifdef PROC_ADDR_VERIFICATION
         info.proc_addr = proc_addr;
-        proc.stack_size = std::max(proc.stack_size, info.stack_height_exit);
+#endif
+        proc.stack_size = std::max(proc.stack_size, stack_height_exit);
 
         auto op_addr = addr;
         auto instr = bc_[addr++];
@@ -459,26 +468,26 @@ private:
 #endif
 
         auto check_stack = [&](size_t pops, size_t pushes) -> std::expected<void, Error> {
-            if (info.stack_height_exit < pops) {
+            if (stack_height_exit < pops) {
                 return std::unexpected(Error(
                     op_addr,
                     std::format(
                         "not enough operands on the stack: expected at least {}, have {}",
                         pops,
-                        info.stack_height_exit
+                        stack_height_exit
                     )
                 ));
             }
 
-            if (max_stack_height - info.stack_height_exit < pushes) {
+            if (max_stack_height - stack_height_exit < pushes) {
                 return std::unexpected(Error(
                     op_addr,
                     std::format("exceeded the maximum static stack height of {}", max_stack_height)
                 ));
             }
 
-            info.stack_height_exit += pushes - pops;
-            proc.stack_size = std::max(proc.stack_size, info.stack_height_exit);
+            stack_height_exit += pushes - pops;
+            proc.stack_size = std::max(proc.stack_size, stack_height_exit);
 
             return {};
         };
@@ -588,8 +597,8 @@ private:
             to_verify_.emplace_back(
                 l,
                 BodyInstrVerifyReq{
-                    .proc_addr = info.proc_addr,
-                    .stack_height = info.stack_height_exit,
+                    .proc_addr = proc_addr,
+                    .stack_height = stack_height_exit,
                 }
             );
 
@@ -753,8 +762,11 @@ private:
             r = std::unexpected(Error(
                 op_addr,
                 std::format(
-                    "encountered a BEGIN instruction nested inside a procedure declared at {:#x}",
+                    "encountered a BEGIN instruction nested inside a procedure"
+#ifdef PROC_ADDR_VERIFICATION
+                    " declared at {:#x}",
                     info.proc_addr
+#endif
                 )
             ));
 
@@ -764,8 +776,11 @@ private:
             r = std::unexpected(Error(
                 op_addr,
                 std::format(
-                    "encountered a CBEGIN instruction nested inside a procedure declared at {:#x}",
+                    "encountered a CBEGIN instruction nested inside a procedure"
+#ifdef PROC_ADDR_VERIFICATION
+                    " declared at {:#x}",
                     info.proc_addr
+#endif
                 )
             ));
 
@@ -918,13 +933,13 @@ private:
         info.kind = BytecodeInfo::Body;
 
         if (instr == Instr::End) {
-            to_verify_.emplace_back(addr, TopLevelInstrVerifyReq{.main = false});
+            to_verify_.emplace_back(addr, TopLevelInstrVerifyReq{});
         } else if (continue_path) {
             to_verify_.emplace_back(
                 addr,
                 BodyInstrVerifyReq{
-                    .proc_addr = info.proc_addr,
-                    .stack_height = info.stack_height_exit,
+                    .proc_addr = proc_addr,
+                    .stack_height = stack_height_exit,
                 }
             );
         }
@@ -1024,10 +1039,10 @@ private:
     }
 
     bytecode::Module &mod_;
-    std::vector<Instr> &bc_ = mod_.bytecode;
+    std::span<Instr> bc_ = mod_.bytecode;
 
     size_t last_strtab_entry_ = 0;
-    std::vector<VerifyReq> to_verify_{{.addr = 0, .kind = TopLevelInstrVerifyReq{.main = true}}};
+    std::vector<VerifyReq> to_verify_{{.addr = 0, .kind = TopLevelInstrVerifyReq{}}};
     std::vector<BytecodeInfo> verified_;
     std::unordered_map<uint32_t, ProcInfo> procs_;
     std::vector<PostValidateReq> post_validate_reqs_;
