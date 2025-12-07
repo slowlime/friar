@@ -1,5 +1,11 @@
 #include "verifier.hpp"
 
+#include "config.hpp"
+
+#ifdef VERIFIER_TRACE
+#include <iostream>
+#endif
+
 #include <algorithm>
 #include <cstdint>
 #include <format>
@@ -7,7 +13,6 @@
 #include <utility>
 #include <variant>
 
-#include "config.hpp"
 #include "util.hpp"
 
 using namespace friar;
@@ -463,7 +468,7 @@ private:
         auto op_addr = addr;
         auto instr = bc_[addr++];
 
-#if 0
+#ifdef VERIFIER_TRACE
         std::println(std::cerr, "verifying {:#x} (op {:#02x}) at stack height {}", op_addr, uint8_t(instr), info.stack_height_entry);
 #endif
 

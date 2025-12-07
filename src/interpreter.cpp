@@ -1,6 +1,7 @@
 #include "interpreter.hpp"
 
-#include "runtime.hpp"
+#include "config.hpp"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
@@ -13,6 +14,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "runtime.hpp"
 
 using namespace friar::interpreter;
 using namespace friar;
@@ -290,6 +293,7 @@ void Value::stringify_to(std::ostream &s) const noexcept {
             break;
 
         case SEXP:
+            // NOLINTNEXTLINE(performance-no-int-to-ptr)
             s << reinterpret_cast<const char *>(to_sexp()->tag);
             auto n = len();
 
@@ -439,7 +443,7 @@ enter_frame: {
     __gc_stack_top = static_cast<void *>(stack.data());
     __gc_stack_bottom = static_cast<void *>(stack.data() + base + proc->locals);
 
-#if 0
+#if INTERPRETER_TRACE
     std::println(
         std::cerr,
         "calling {:#x} ({}{} args, {} locals, {} values)",
@@ -453,8 +457,11 @@ enter_frame: {
 }
 
     while (true) {
-#if 0
-        std::print(std::cerr, "[{:#x}] op = {:#02x} stack = [", pc, uint8_t(bc[pc]));
+#if INTERPRETER_TRACE
+        std::print(std::cerr, "[{:#x}] op = {:#02x} ", pc, uint8_t(bc[pc]));
+
+#if INTERPRETER_TRACE >= 2
+        std::print(std::cerr, "stack = [");
 
         for (size_t i = 0; i < stack.size(); ++i) {
             if (__gc_stack_bottom == stack.data() + i) {
@@ -471,7 +478,19 @@ enter_frame: {
             std::print(std::cerr, " ({})", Value::from_repr(stack[i]).type_to_string());
         }
 
-        std::println(std::cerr, "]");
+        std::print(std::cerr, "]");
+#else
+        std::print(
+            std::cerr,
+            "stack height = {} ({} max, {} allocated)",
+            static_cast<auint *>(__gc_stack_bottom) - static_cast<auint *>(__gc_stack_top),
+            stack.size(),
+            stack.capacity()
+        );
+#endif
+
+        std::println(std::cerr, "");
+
 #endif
 
         switch (bc[pc++]) {
@@ -1099,6 +1118,7 @@ enter_frame: {
 
             if (v.is_sexp()) {
                 auto *sexp = v.to_sexp();
+                // NOLINTNEXTLINE(performance-no-int-to-ptr)
                 auto *actual_tag = reinterpret_cast<char *>(sexp->tag);
 
                 push(Value::from_bool(LEN(sexp->data_header) == n && expected_tag == actual_tag));

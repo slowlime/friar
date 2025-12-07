@@ -22,9 +22,10 @@ runtime_dep = cc.find_library(
 
 conf_data = configuration_data()
 conf_data.set('PROC_ADDR_VERIFICATION', get_option('proc_addr_verification'))
+conf_data.set('VERIFIER_TRACE', get_option('verifier_trace'))
+conf_data.set('INTERPRETER_TRACE', get_option('interpreter_trace'))
 
 configure_file(
-  input: 'src/config.hpp.in',
   output: 'config.hpp',
   configuration: conf_data,
 )
