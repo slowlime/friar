@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <span>
@@ -43,6 +44,11 @@ public:
         ModuleInfo result;
 
         for (auto &[addr, info] : procs_) {
+            std::span<std::byte, 4> hi_imm_bytes(std::as_writable_bytes(bc_.subspan(addr + 1, 4)));
+            auto hi_imm = util::from_u32_le(hi_imm_bytes);
+            hi_imm |= info.stack_size << 16;
+            util::to_u32_le(hi_imm_bytes, hi_imm);
+
             result.procs[addr] = ModuleInfo::Proc{
                 .params = info.params,
                 .locals = info.locals,
@@ -469,7 +475,13 @@ private:
         auto instr = bc_[addr++];
 
 #ifdef VERIFIER_TRACE
-        std::println(std::cerr, "verifying {:#x} (op {:#02x}) at stack height {}", op_addr, uint8_t(instr), info.stack_height_entry);
+        std::println(
+            std::cerr,
+            "verifying {:#x} (op {:#02x}) at stack height {}",
+            op_addr,
+            uint8_t(instr),
+            info.stack_height_entry
+        );
 #endif
 
         auto check_stack = [&](size_t pops, size_t pushes) -> std::expected<void, Error> {
@@ -966,9 +978,8 @@ private:
 
         uint32_t result = 0;
 
-        for (size_t i = 0; i < sizeof(uint32_t); ++i) {
-            result |= static_cast<uint32_t>(bc_[addr + i]) << 8 * i;
-        }
+        result =
+            util::from_u32_le(std::span<const std::byte, 4>(std::as_bytes(bc_.subspan(addr, 4))));
 
         if (!allow_negative && (result >> 31) != 0) {
             return std::unexpected(
@@ -1034,9 +1045,9 @@ private:
             );
         }
 
-        for (size_t i = 0; i < sizeof(uint32_t); ++i) {
-            result.idx |= static_cast<uint32_t>(bc_[addr + i + 1]) << 8 * i;
-        }
+        result.idx = util::from_u32_le(
+            std::span<const std::byte, 4>(std::as_bytes(bc_.subspan(addr + 1, 4)))
+        );
 
         addr += size;
 

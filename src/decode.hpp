@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -11,6 +12,7 @@
 #include <variant>
 
 #include "bytecode.hpp"
+#include "src/util.hpp"
 
 namespace friar::decode {
 
@@ -347,9 +349,9 @@ std::expected<Imm32, Error> Decoder::read_imm32(std::string_view field) {
         .imm = 0,
     };
 
-    for (size_t i = 0; i < sizeof(uint32_t); ++i) {
-        result.imm |= static_cast<uint32_t>(bc_[pos_++]) << 8 * i;
-    }
+    result.imm =
+        util::from_u32_le(std::span<const std::byte, 4>(std::as_bytes(bc_.subspan(pos_, 4))));
+    pos_ += sizeof(uint32_t);
 
     return result;
 }
@@ -404,9 +406,9 @@ std::expected<ImmVarspec, Error> Decoder::read_imm_varspec(bool ignore_hi) {
         );
     }
 
-    for (size_t i = 0; i < sizeof(uint32_t); ++i) {
-        result.idx |= static_cast<uint32_t>(bc_[pos_++]) << 8 * i;
-    }
+    result.idx =
+        util::from_u32_le(std::span<const std::byte, 4>(std::as_bytes(bc_.subspan(pos_, 4))));
+    pos_ += sizeof(uint32_t);
 
     return result;
 }

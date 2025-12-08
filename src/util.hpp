@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <system_error>
 
 namespace friar::util {
@@ -38,6 +40,22 @@ constexpr size_t compute_decimal_width(size_t v) {
     width += (((v + c1) & (v + c2)) ^ ((v + c3) & (v + c4))) >> 17;
 
     return width;
+}
+
+inline uint32_t from_u32_le(std::span<const std::byte, 4> bytes) {
+    uint32_t result = 0;
+
+    for (size_t i = 0; i < sizeof(uint32_t); ++i) {
+        result |= static_cast<uint32_t>(bytes[i]) << 8 * i;
+    }
+
+    return result;
+}
+
+inline void to_u32_le(std::span<std::byte, 4> bytes, uint32_t value) {
+    for (size_t i = 0; i < sizeof(uint32_t); ++i, value >>= 8) {
+        bytes[i] = std::byte(value & 0xff);
+    }
 }
 
 } // namespace friar::util
