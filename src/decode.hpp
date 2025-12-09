@@ -12,7 +12,7 @@
 #include <variant>
 
 #include "bytecode.hpp"
-#include "src/util.hpp"
+#include "util.hpp"
 
 namespace friar::decode {
 

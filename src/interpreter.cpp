@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "runtime.hpp"
-#include "src/util.hpp"
-#include "src/verifier.hpp"
+#include "util.hpp"
+#include "verifier.hpp"
 
 using namespace friar::interpreter;
 using namespace friar;
@@ -1412,6 +1412,14 @@ enter_frame:
             auto *closure = get_object_content_ptr(alloc_closure(n + 1));
             PROPAGATE_DYNEXP_VOID(push(Value::from_ptr(closure)));
             get_object_field(closure, 0) = Value::from_int(static_cast<auint>(l));
+
+#ifdef DYNAMIC_VERIFICATION
+            if (n > verifier::max_captures) {
+                return std::unexpected(make_error(
+                    "too many captures: expected at most {}, got {}", verifier::max_captures, n
+                ));
+            }
+#endif
 
             for (size_t i = 0; i < n; ++i) {
                 auto kind = static_cast<uint8_t>(bc[pc++]);

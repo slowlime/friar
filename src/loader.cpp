@@ -1,13 +1,16 @@
 #include "loader.hpp"
-#include "src/util.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cerrno>
 #include <format>
 #include <ios>
+#include <iterator>
 #include <memory>
 #include <span>
 #include <utility>
+
+#include "util.hpp"
 
 using namespace friar::bytecode;
 using namespace friar::loader;
@@ -157,7 +160,7 @@ std::expected<void, Loader::Error> Loader::load_bytecode() {
         auto bytes = std::as_writable_bytes(std::span(buf.get(), buf_size));
         if (auto r = load_bytes("bytecode", bytes, true); r) {
             auto read_instrs = std::span(buf.get(), *r);
-            mod_.bytecode.append_range(read_instrs);
+            std::ranges::copy(read_instrs, std::back_inserter(mod_.bytecode));
 
             if (*r < buf_size) {
                 break;

@@ -7,7 +7,7 @@
 #include <string>
 #include <string_view>
 
-#include "src/bytecode.hpp"
+#include "bytecode.hpp"
 
 namespace friar::loader {
 
@@ -34,7 +34,8 @@ private:
     Error make_error(std::string msg, size_t pos) noexcept;
     Error make_eof_error(std::string_view field, size_t bytes_missing);
 
-    std::expected<size_t, Error> load_bytes(std::string_view field, std::span<std::byte> dst, bool allow_partial = false);
+    std::expected<size_t, Error>
+    load_bytes(std::string_view field, std::span<std::byte> dst, bool allow_partial = false);
     std::expected<uint32_t, Error> load_u32(std::string_view field);
 
     std::expected<void, Error> load_header();

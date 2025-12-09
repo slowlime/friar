@@ -8,7 +8,7 @@
 #include "idiom.hpp"
 #include "interpreter.hpp"
 #include "loader.hpp"
-#include "src/time.hpp"
+#include "time.hpp"
 #include "util.hpp"
 #include "verifier.hpp"
 

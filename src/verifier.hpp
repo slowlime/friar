@@ -1,10 +1,10 @@
 #pragma once
 
-#include "src/bytecode.hpp"
-
 #include <expected>
 #include <string>
 #include <unordered_map>
+
+#include "bytecode.hpp"
 
 namespace friar::verifier {
 
