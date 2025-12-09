@@ -1,14 +1,18 @@
 #include <iostream>
 #include <print>
-#include <variant>
 
 #include "args.hpp"
+#include "config.hpp"
 #include "disas.hpp"
 #include "idiom.hpp"
 #include "interpreter.hpp"
 #include "loader.hpp"
 #include "util.hpp"
 #include "verifier.hpp"
+
+#ifdef DYNAMIC_VERIFICATION
+#include <variant>
+#endif
 
 using namespace friar;
 
@@ -84,10 +88,20 @@ int main(int argc, char **argv) {
         return print_disas(*mod);
     }
 
-    auto mod_info = verifier::verify(*mod);
+    std::optional<decltype(verifier::verify(*mod))> mod_info;
 
-    if (!mod_info) {
-        auto &e = mod_info.error();
+    if (
+#ifdef DYNAMIC_VERIFICATION
+        args.mode == args::Mode::Idiom
+#else
+        true
+#endif
+    ) {
+        mod_info = verifier::verify(*mod);
+    }
+
+    if (mod_info && !*mod_info) {
+        auto &e = mod_info->error();
         std::println(std::cerr, "Module verification failed (at byte {:#x}): {}", e.offset, e.msg);
 
         return 1;
@@ -98,10 +112,17 @@ int main(int argc, char **argv) {
     }
 
     if (args.mode == args::Mode::Idiom) {
-        return print_idioms(*mod, *mod_info);
+        return print_idioms(*mod, **mod_info);
     }
 
-    interpreter::Interpreter interp(*mod, *mod_info, std::cin, std::cout);
+    interpreter::Interpreter interp(
+        *mod,
+#ifndef DYNAMIC_VERIFICATION
+        **mod_info,
+#endif
+        std::cin,
+        std::cout
+    );
     auto r = interp.run();
 
     if (!r) {

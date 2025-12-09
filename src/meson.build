@@ -8,3 +8,4 @@ src += files(
   'util.cpp',
   'verifier.cpp',
 )
+

@@ -24,6 +24,7 @@ conf_data = configuration_data()
 conf_data.set('PROC_ADDR_VERIFICATION', get_option('proc_addr_verification'))
 conf_data.set('VERIFIER_TRACE', get_option('verifier_trace'))
 conf_data.set('INTERPRETER_TRACE', get_option('interpreter_trace'))
+conf_data.set('DYNAMIC_VERIFICATION', get_option('dynamic_verification'))
 
 configure_file(
   output: 'config.hpp',

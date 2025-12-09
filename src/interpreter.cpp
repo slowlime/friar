@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "runtime.hpp"
+#include "src/util.hpp"
 
 using namespace friar::interpreter;
 using namespace friar;
@@ -320,11 +321,18 @@ void Value::stringify_to(std::ostream &s) const noexcept {
 
 Interpreter::Interpreter(
     bytecode::Module &mod,
+#ifndef DYNAMIC_VERIFICATION
     const verifier::ModuleInfo &info,
+#endif
     std::istream &input,
     std::ostream &output
 )
-    : mod_(mod), info_(info), input_(input), output_(output) {}
+    : mod_(mod),
+#ifndef DYNAMIC_VERIFICATION
+      info_(info),
+#endif
+      input_(input), output_(output) {
+}
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::expected<void, Interpreter::Error> Interpreter::run() {
@@ -332,7 +340,7 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
 
     std::vector<Frame> frames;
     std::vector<auint> stack;
-    const auto *bc = mod_.bytecode.data();
+    std::span<const Instr> bc = mod_.bytecode;
 
     // globals + 2 dummy `main` arguments.
     stack.resize(mod_.global_count + 2, BOX(0));
@@ -347,13 +355,17 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
     __gc_stack_bottom = static_cast<void *>(stack.data() + base);
     GcGuard _gc_guard;
 
-    auto read_u32 = [&] {
-        auto b0 = static_cast<uint32_t>(bc[pc++]);
-        auto b1 = static_cast<uint32_t>(bc[pc++]);
-        auto b2 = static_cast<uint32_t>(bc[pc++]);
-        auto b3 = static_cast<uint32_t>(bc[pc++]);
+    auto read_u32_at = [&](uint32_t addr) {
+        std::span<const std::byte, 4> bytes(std::as_bytes(bc.subspan(addr, 4)));
 
-        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        return util::from_u32_le(bytes);
+    };
+
+    auto read_u32 = [&] {
+        auto result = read_u32_at(pc);
+        pc += sizeof(uint32_t);
+
+        return result;
     };
 
     auto top_nth = [&](auto n) {
@@ -414,7 +426,7 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
     uint32_t call_target = 0;
     bool call_closure = false;
 
-enter_frame: {
+enter_frame:
     frames.push_back(
         Frame{
             .proc_addr = call_target,
@@ -425,36 +437,7 @@ enter_frame: {
         }
     );
 
-    const auto *proc = &info_.procs.at(call_target);
-    base = static_cast<auint *>(__gc_stack_bottom) - static_cast<auint *>(__gc_stack_top);
-    auto new_size = static_cast<uint64_t>(base) + proc->locals + proc->stack_size;
-
-    if (new_size > max_stack_size) [[unlikely]] {
-        return std::unexpected(make_error("stack overflow"));
-    }
-
-    if (stack.size() < new_size) {
-        stack.resize(new_size, BOX(0));
-    }
-
     pc = call_target;
-    args = proc->params;
-
-    __gc_stack_top = static_cast<void *>(stack.data());
-    __gc_stack_bottom = static_cast<void *>(stack.data() + base + proc->locals);
-
-#if INTERPRETER_TRACE
-    std::println(
-        std::cerr,
-        "calling {:#x} ({}{} args, {} locals, {} values)",
-        call_target,
-        args,
-        proc->is_closure ? " + 1" : "",
-        proc->locals,
-        proc->stack_size
-    );
-#endif
-}
 
     while (true) {
 #if INTERPRETER_TRACE
@@ -1029,12 +1012,45 @@ enter_frame: {
         }
 
         case Instr::Begin:
-        case Instr::Cbegin:
+        case Instr::Cbegin: {
             // read a, n.
             read_u32();
             read_u32();
 
+#ifdef DYNAMIC_VERIFICATION
+#else
+            const auto *proc = &info_.procs.at(call_target);
+            base = static_cast<auint *>(__gc_stack_bottom) - static_cast<auint *>(__gc_stack_top);
+            auto new_size = static_cast<uint64_t>(base) + proc->locals + proc->stack_size;
+
+            if (new_size > max_stack_size) [[unlikely]] {
+                return std::unexpected(make_error("stack overflow"));
+            }
+
+            if (stack.size() < new_size) {
+                stack.resize(new_size, BOX(0));
+            }
+
+            args = proc->params;
+
+            __gc_stack_top = static_cast<void *>(stack.data());
+            __gc_stack_bottom = static_cast<void *>(stack.data() + base + proc->locals);
+#endif
+
+#if INTERPRETER_TRACE
+            std::println(
+                std::cerr,
+                "calling {:#x} ({}{} args, {} locals, {} values)",
+                call_target,
+                args,
+                proc->is_closure ? " + 1" : "",
+                proc->locals,
+                proc->stack_size
+            );
+#endif
+
             break;
+        }
 
         case Instr::Closure: {
             auto l = read_u32();
@@ -1082,11 +1098,13 @@ enter_frame: {
             }
 
             auto l = closure.field(0).get().get_auint();
-            const auto &proc = info_.procs.at(l);
 
-            if (proc.params != n) [[unlikely]] {
+            // read the low word of the first immediate: the high word stores the stack size.
+            auto params = read_u32_at(l + 1) & 0xffff;
+
+            if (params != n) [[unlikely]] {
                 return std::unexpected(
-                    make_error("the function expected {} arguments, got {}", proc.params, n)
+                    make_error("the function expected {} arguments, got {}", params, n)
                 );
             }
 

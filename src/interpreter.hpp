@@ -9,8 +9,9 @@
 #include <string>
 #include <variant>
 
+#include "config.hpp"
 #include "bytecode.hpp"
-#include "src/verifier.hpp"
+#include "verifier.hpp"
 
 namespace friar::interpreter {
 
@@ -41,7 +42,9 @@ public:
 
     Interpreter(
         bytecode::Module &mod,
+#ifndef DYNAMIC_VERIFICATION
         const verifier::ModuleInfo &info,
+#endif
         std::istream &input,
         std::ostream &output
     );
@@ -70,7 +73,11 @@ private:
     };
 
     bytecode::Module &mod_;
+
+#ifndef DYNAMIC_VERIFICATION
     const verifier::ModuleInfo &info_;
+#endif
+
     std::istream &input_;
     std::ostream &output_;
 };
