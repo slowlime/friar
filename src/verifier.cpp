@@ -46,7 +46,7 @@ public:
         for (auto &[addr, info] : procs_) {
             std::span<std::byte, 4> hi_imm_bytes(std::as_writable_bytes(bc_.subspan(addr + 1, 4)));
             auto hi_imm = util::from_u32_le(hi_imm_bytes);
-            hi_imm |= info.stack_size << 16;
+            hi_imm |= uint32_t(info.stack_size) << 16;
             util::to_u32_le(hi_imm_bytes, hi_imm);
 
             result.procs[addr] = ModuleInfo::Proc{
