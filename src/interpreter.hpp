@@ -65,6 +65,11 @@ private:
         // the number of the caller's arguments.
         size_t saved_args;
 
+#ifdef DYNAMIC_VERIFICATION
+        // the number of the caller's locals.
+        size_t saved_locals;
+#endif
+
         // the current source line for this frame.
         uint32_t line = 0;
 

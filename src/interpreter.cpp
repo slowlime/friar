@@ -2,6 +2,7 @@
 
 #include "config.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
@@ -17,6 +18,7 @@
 
 #include "runtime.hpp"
 #include "src/util.hpp"
+#include "src/verifier.hpp"
 
 using namespace friar::interpreter;
 using namespace friar;
@@ -212,6 +214,8 @@ private:
 
 class ValuePtr {
 public:
+    ValuePtr() = default;
+
     explicit ValuePtr(auint *ptr) : ptr_(ptr) {}
 
     ValuePtr(const ValuePtr &other) = default;
@@ -334,7 +338,15 @@ Interpreter::Interpreter(
       input_(input), output_(output) {
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+#ifdef DYNAMIC_VERIFICATION
+template<class T>
+using DynamicExpected = std::expected<T, Interpreter::Error>;
+#else
+template<class T>
+using DynamicExpected = T;
+#endif
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity, readability-function-size)
 std::expected<void, Interpreter::Error> Interpreter::run() {
     UniqueRunnerGuard _unique_guard;
 
@@ -350,52 +362,14 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
     uint32_t args = 2; // `main` takes 2 arguments.
     uint32_t base = mod_.global_count + args;
 
+#ifdef DYNAMIC_VERIFICATION
+    uint32_t locals = 0;
+#endif
+
     // initialize the GC (use a virtual stack).
     __gc_stack_top = static_cast<void *>(stack.data());
     __gc_stack_bottom = static_cast<void *>(stack.data() + base);
     GcGuard _gc_guard;
-
-    auto read_u32_at = [&](uint32_t addr) {
-        std::span<const std::byte, 4> bytes(std::as_bytes(bc.subspan(addr, 4)));
-
-        return util::from_u32_le(bytes);
-    };
-
-    auto read_u32 = [&] {
-        auto result = read_u32_at(pc);
-        pc += sizeof(uint32_t);
-
-        return result;
-    };
-
-    auto top_nth = [&](auto n) {
-        return ValuePtr(static_cast<auint *>(__gc_stack_bottom) - static_cast<ptrdiff_t>(n + 1));
-    };
-
-    auto pop_n = [&](size_t n) {
-        __gc_stack_bottom = static_cast<void *>(static_cast<auint *>(__gc_stack_bottom) - n);
-    };
-
-    auto push = [&](Value v) {
-        top_nth(-1) = v;
-        __gc_stack_bottom = static_cast<void *>(static_cast<auint *>(__gc_stack_bottom) + 1);
-    };
-
-    auto global = [&](uint32_t m) { return ValuePtr(static_cast<auint *>(__gc_stack_top) + m); };
-
-    auto local = [&](uint32_t m) {
-        return ValuePtr(static_cast<auint *>(__gc_stack_top) + base + m);
-    };
-
-    auto arg = [&](uint32_t m) {
-        return ValuePtr(static_cast<auint *>(__gc_stack_top) + base - args + m);
-    };
-
-    auto capture = [&](uint32_t m) {
-        auto closure = Value::from_repr(static_cast<auint *>(__gc_stack_top)[base - args - 1]);
-
-        return closure.field(m + 1);
-    };
 
     auto backtrace = [&] {
         Backtrace result;
@@ -422,9 +396,255 @@ std::expected<void, Interpreter::Error> Interpreter::run() {
         };
     };
 
+    auto read_u32_at = [&](uint32_t addr, bool allow_neg = false) -> DynamicExpected<uint32_t> {
+#ifdef DYNAMIC_VERIFICATION
+        if (addr + 4 > bc.size_bytes()) {
+            return std::unexpected(make_error(
+                "trying to read a 32-bit immediate at {:#x} would go beyond the size of the bytes "
+                "({:#x})",
+                addr,
+                bc.size_bytes()
+            ));
+        }
+#endif
+        std::span<const std::byte, 4> bytes(std::as_bytes(bc.subspan(addr, 4)));
+        auto result = util::from_u32_le(bytes);
+
+#ifdef DYNAMIC_VERIFICATION
+        if (!allow_neg && result >> 31) {
+            return std::unexpected(
+                make_error("the 32-bit immediate {:#x} at {:#x} is too large", result, addr)
+            );
+        }
+#endif
+
+        return result;
+    };
+
+    auto read_u32 = [&](bool allow_neg = false) {
+        auto result = read_u32_at(pc, allow_neg);
+
+#ifdef DYNAMIC_VERIFICATION
+        if (result) {
+#endif
+            pc += sizeof(uint32_t);
+#ifdef DYNAMIC_VERIFICATION
+        }
+#endif
+
+        return result;
+    };
+
+    auto stack_size = [&] -> size_t {
+        return static_cast<auint *>(__gc_stack_bottom) - static_cast<auint *>(__gc_stack_top);
+    };
+
+    auto top_nth = [&](auto n) -> DynamicExpected<ValuePtr> {
+#ifdef DYNAMIC_VERIFICATION
+        if (n > 0 && static_cast<size_t>(n) >= stack_size()) {
+            return std::unexpected(make_error(
+                "trying to access stack value #{}, "
+                "which is out of range for the stack of size {}",
+                n,
+                stack_size()
+            ));
+        }
+#endif
+
+        return ValuePtr(static_cast<auint *>(__gc_stack_bottom) - static_cast<ptrdiff_t>(n + 1));
+    };
+
+    auto pop_n = [&](size_t n) -> DynamicExpected<void> {
+#ifdef DYNAMIC_VERIFICATION
+        if (n > stack_size()) {
+            return std::unexpected(make_error(
+                "trying to pop {} stack values, "
+                "which is out of range for the stack of size {}",
+                n,
+                stack_size()
+            ));
+        }
+#endif
+
+        __gc_stack_bottom = static_cast<void *>(static_cast<auint *>(__gc_stack_bottom) - n);
+
+#ifdef DYNAMIC_VERIFICATION
+        return {};
+#endif
+    };
+
+    auto push = [&](Value v) -> DynamicExpected<void> {
+#ifdef DYNAMIC_VERIFICATION
+        auto new_size = stack_size() + 1;
+
+        if (new_size > max_stack_size) [[unlikely]] {
+            return std::unexpected(make_error("stack overflow"));
+        }
+
+        if (new_size > stack.size()) {
+            stack.push_back(v.to_repr());
+
+            __gc_stack_top = static_cast<void *>(stack.data());
+            __gc_stack_bottom = static_cast<void *>(stack.data() + new_size);
+        } else {
+            *top_nth(-1) = v;
+            __gc_stack_bottom = static_cast<void *>(static_cast<auint *>(__gc_stack_bottom) + 1);
+        }
+#else
+        top_nth(-1) = v;
+        __gc_stack_bottom = static_cast<void *>(static_cast<auint *>(__gc_stack_bottom) + 1);
+#endif
+
+#ifdef DYNAMIC_VERIFICATION
+        return {};
+#endif
+    };
+
+    auto global = [&](uint32_t m) -> DynamicExpected<ValuePtr> {
+#ifdef DYNAMIC_VERIFICATION
+        if (m >= mod_.global_count) {
+            return std::unexpected(make_error(
+                "trying to access global #{}, but there are only {} globals declared",
+                m,
+                mod_.global_count
+            ));
+        }
+#endif
+
+        return ValuePtr(static_cast<auint *>(__gc_stack_top) + m);
+    };
+
+    auto local = [&](uint32_t m) -> DynamicExpected<ValuePtr> {
+#ifdef DYNAMIC_VERIFICATION
+        if (m >= locals) {
+            return std::unexpected(make_error(
+                "trying to access local #{}, but there are only {} locals declared", m, locals
+            ));
+        }
+#endif
+
+        return ValuePtr(static_cast<auint *>(__gc_stack_top) + base + m);
+    };
+
+    auto arg = [&](uint32_t m) -> DynamicExpected<ValuePtr> {
+#ifdef DYNAMIC_VERIFICATION
+        if (m >= args) {
+            return std::unexpected(make_error(
+                "trying to access argument #{}, but there are only {} arguments", m, args
+            ));
+        }
+#endif
+
+        return ValuePtr(static_cast<auint *>(__gc_stack_top) + base - args + m);
+    };
+
+    auto capture = [&](uint32_t m) -> DynamicExpected<ValuePtr> {
+#ifdef DYNAMIC_VERIFICATION
+        if (!frames.back().is_closure) {
+            return std::unexpected(make_error(
+                "trying to access a captured variable "
+                "when there's no closure associated with the frame"
+            ));
+        }
+#endif
+
+        auto closure = Value::from_repr(static_cast<auint *>(__gc_stack_top)[base - args - 1]);
+
+#ifdef DYNAMIC_VERIFICATION
+        if (auto len = closure.len() - 1; m >= len) {
+            return std::unexpected(make_error(
+                "trying to access capture #{}, "
+                "but there are only {} variables captured by the closure",
+                m,
+                len
+            ));
+        }
+#endif
+
+        return closure.field(m + 1);
+    };
+
+#ifdef DYNAMIC_VERIFICATION
+    auto check_strtab = [&](uint32_t s) -> DynamicExpected<std::string_view> {
+        if (s >= mod_.strtab.size()) {
+            return std::unexpected(make_error(
+                "string table offset {:#x} is out of range for the string table of size {:#x}",
+                s,
+                mod_.strtab.size()
+            ));
+        }
+
+        auto it = std::find(mod_.strtab.begin() + s, mod_.strtab.end(), '\0');
+
+        if (it == mod_.strtab.end()) {
+            return std::unexpected(
+                make_error("string starting at {:#x} in the string table is not NUL-terminated", s)
+            );
+        }
+
+        return std::string_view(mod_.strtab.begin() + s, it);
+    };
+
+    auto check_jmp = [&](uint32_t l) -> DynamicExpected<void> {
+        if (l >= bc.size()) {
+            return std::unexpected(make_error(
+                "address {:#x} points outside the bytecode section of size {:#x}", l, bc.size()
+            ));
+        }
+
+        switch (bc[l]) {
+        case Instr::Begin:
+        case Instr::Cbegin:
+            return std::unexpected(make_error("address {:#x} must not point to BEGIN/CBEGIN", l));
+
+        default:
+            break;
+        }
+
+        return {};
+    };
+
+    auto check_begin = [&](uint32_t l) -> DynamicExpected<void> {
+        if (l >= bc.size()) {
+            return std::unexpected(make_error(
+                "address {:#x} points outside the bytecode section of size {:#x}", l, bc.size()
+            ));
+        }
+
+        switch (auto op = bc[l]) {
+        case Instr::Begin:
+        case Instr::Cbegin:
+            break;
+
+        default:
+            return std::unexpected(make_error(
+                "address {:#x} must point to BEGIN/CBEGIN, got {:#02x}", l, static_cast<uint8_t>(op)
+            ));
+        }
+
+        size_t op_size = 1 + 2 * sizeof(uint32_t);
+
+        if (l + op_size > bc.size()) {
+            return std::unexpected(
+                make_error("address {:#x} must point to a valid BEGIN/CBEGIN instruction", l)
+            );
+        }
+
+        return {};
+    };
+#else
+    auto check_strtab = [&](uint32_t s) { return mod_.strtab_entry_at(s); };
+    auto check_jmp = [](uint32_t l) {};
+    auto check_begin = [](uint32_t l) {};
+#endif
+
     // the address to call.
     uint32_t call_target = 0;
     bool call_closure = false;
+
+#ifdef DYNAMIC_VERIFICATION
+    bool is_main = true;
+#endif
 
 enter_frame:
     frames.push_back(
@@ -433,11 +653,29 @@ enter_frame:
             .saved_pc = pc,
             .saved_base = base,
             .saved_args = args,
+
+#ifdef DYNAMIC_VERIFICATION
+            .saved_locals = locals,
+#endif
+
             .is_closure = call_closure,
         }
     );
 
     pc = call_target;
+
+#ifdef DYNAMIC_VERIFICATION
+    switch (bc[pc]) {
+    case Instr::Begin:
+    case Instr::Cbegin:
+        break;
+
+    default:
+        return std::unexpected(make_error(
+            "expected BEGIN or CBEGIN at {:#x}, got {:#02x}", pc, static_cast<uint8_t>(bc[pc])
+        ));
+    }
+#endif
 
     while (true) {
 #if INTERPRETER_TRACE
@@ -458,7 +696,12 @@ enter_frame:
             }
 
             std::print(std::cerr, "{:#x}", stack[i]);
-            std::print(std::cerr, " ({})", Value::from_repr(stack[i]).type_to_string());
+            std::print(
+                std::cerr,
+                " ({} `{}`)",
+                Value::from_repr(stack[i]).type_to_string(),
+                Value::from_repr(stack[i]).stringify()
+            );
         }
 
         std::print(std::cerr, "]");
@@ -476,18 +719,56 @@ enter_frame:
 
 #endif
 
+#ifdef DYNAMIC_VERIFICATION
+
+#define PROPAGATE_DYNEXP_T(T, V, EXPR)                                                             \
+    T V;                                                                                           \
+    do {                                                                                           \
+        if (auto _r = (EXPR)) {                                                                    \
+            V = *std::move(_r);                                                                    \
+        } else {                                                                                   \
+            return std::unexpected(std::move(_r).error());                                         \
+        }                                                                                          \
+    } while (false)
+
+#define PROPAGATE_DYNEXP(V, EXPR) PROPAGATE_DYNEXP_T(decltype((EXPR))::value_type, V, EXPR)
+
+#define PROPAGATE_DYNEXP_VOID(EXPR)                                                                \
+    do {                                                                                           \
+        if (auto _r = (EXPR); !_r) {                                                               \
+            return std::unexpected(std::move(_r).error());                                         \
+        }                                                                                          \
+    } while (false)
+
+#else
+
+#define PROPAGATE_DYNEXP(V, EXPR) auto V = (EXPR)
+#define PROPAGATE_DYNEXP_T(T, V, EXPR) T V = (EXPR)
+#define PROPAGATE_DYNEXP_VOID(EXPR) EXPR
+
+#endif
+
+#ifdef DYNAMIC_VERIFICATION
+        if (pc >= bc.size()) {
+            return std::unexpected(make_error(
+                "the PC ({:#x}) is outside the bytecode section of size {:#x}", pc, bc.size()
+            ));
+        }
+#endif
+
         switch (bc[pc++]) {
         case Instr::Add: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_auint();
-                auto rhs = top_nth(0).get().get_auint();
-                pop_n(2);
-                push(Value::from_int(lhs + rhs));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_auint();
+                auto rhs = v0.get().get_auint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_int(lhs + rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
-                    "cannot add {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    "cannot add {} and {}", v1.get().type_to_string(), v0.get().type_to_string()
                 ));
             }
 
@@ -495,16 +776,19 @@ enter_frame:
         }
 
         case Instr::Sub: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_auint();
-                auto rhs = top_nth(0).get().get_auint();
-                pop_n(2);
-                push(Value::from_int(lhs - rhs));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_auint();
+                auto rhs = v0.get().get_auint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_int(lhs - rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
                     "cannot subtract {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    v1.get().type_to_string(),
+                    v0.get().type_to_string()
                 ));
             }
 
@@ -512,16 +796,19 @@ enter_frame:
         }
 
         case Instr::Mul: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_auint();
-                auto rhs = top_nth(0).get().get_auint();
-                pop_n(2);
-                push(Value::from_int(lhs * rhs));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_auint();
+                auto rhs = v0.get().get_auint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_int(lhs * rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
                     "cannot multiply {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    v1.get().type_to_string(),
+                    v0.get().type_to_string()
                 ));
             }
 
@@ -529,21 +816,22 @@ enter_frame:
         }
 
         case Instr::Div: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_aint();
-                auto rhs = top_nth(0).get().get_aint();
-                pop_n(2);
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_aint();
+                auto rhs = v0.get().get_aint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
 
                 if (rhs == 0) [[unlikely]] {
                     return std::unexpected(make_error("division by zero"));
                 }
 
-                push(Value::from_int(lhs / rhs));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_int(lhs / rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
-                    "cannot divide {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    "cannot divide {} and {}", v1.get().type_to_string(), v0.get().type_to_string()
                 ));
             }
 
@@ -551,10 +839,13 @@ enter_frame:
         }
 
         case Instr::Mod: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_aint();
-                auto rhs = top_nth(0).get().get_aint();
-                pop_n(2);
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_aint();
+                auto rhs = v0.get().get_aint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
 
                 if (rhs == 0) [[unlikely]] {
                     return std::unexpected(
@@ -562,12 +853,12 @@ enter_frame:
                     );
                 }
 
-                push(Value::from_int(lhs % rhs));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_int(lhs % rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
                     "cannot take the remainder of {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    v1.get().type_to_string(),
+                    v0.get().type_to_string()
                 ));
             }
 
@@ -575,16 +866,17 @@ enter_frame:
         }
 
         case Instr::Lt: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_aint();
-                auto rhs = top_nth(0).get().get_aint();
-                pop_n(2);
-                push(Value::from_bool(lhs < rhs));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_aint();
+                auto rhs = v0.get().get_aint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(lhs < rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
-                    "cannot compare {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    "cannot compare {} and {}", v1.get().type_to_string(), v0.get().type_to_string()
                 ));
             }
 
@@ -592,16 +884,17 @@ enter_frame:
         }
 
         case Instr::Le: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_aint();
-                auto rhs = top_nth(0).get().get_aint();
-                pop_n(2);
-                push(Value::from_bool(lhs <= rhs));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_aint();
+                auto rhs = v0.get().get_aint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(lhs <= rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
-                    "cannot compare {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    "cannot compare {} and {}", v1.get().type_to_string(), v0.get().type_to_string()
                 ));
             }
 
@@ -609,16 +902,17 @@ enter_frame:
         }
 
         case Instr::Gt: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_aint();
-                auto rhs = top_nth(0).get().get_aint();
-                pop_n(2);
-                push(Value::from_bool(lhs > rhs));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_aint();
+                auto rhs = v0.get().get_aint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(lhs > rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
-                    "cannot compare {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    "cannot compare {} and {}", v1.get().type_to_string(), v0.get().type_to_string()
                 ));
             }
 
@@ -626,16 +920,17 @@ enter_frame:
         }
 
         case Instr::Ge: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_aint();
-                auto rhs = top_nth(0).get().get_aint();
-                pop_n(2);
-                push(Value::from_bool(lhs >= rhs));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_aint();
+                auto rhs = v0.get().get_aint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(lhs >= rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
-                    "cannot compare {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    "cannot compare {} and {}", v1.get().type_to_string(), v0.get().type_to_string()
                 ));
             }
 
@@ -643,19 +938,20 @@ enter_frame:
         }
 
         case Instr::Eq: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_aint();
-                auto rhs = top_nth(0).get().get_aint();
-                pop_n(2);
-                push(Value::from_bool(lhs == rhs));
-            } else if (top_nth(1).get().is_int() || top_nth(0).get().is_int()) {
-                pop_n(2);
-                push(Value::from_bool(false));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_aint();
+                auto rhs = v0.get().get_aint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(lhs == rhs)));
+            } else if (v1.get().is_int() || v0.get().is_int()) {
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(false)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
-                    "cannot compare {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    "cannot compare {} and {}", v1.get().type_to_string(), v0.get().type_to_string()
                 ));
             }
 
@@ -663,16 +959,17 @@ enter_frame:
         }
 
         case Instr::Ne: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_aint();
-                auto rhs = top_nth(0).get().get_aint();
-                pop_n(2);
-                push(Value::from_bool(lhs != rhs));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_aint();
+                auto rhs = v0.get().get_aint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(lhs != rhs)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
-                    "cannot compare {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    "cannot compare {} and {}", v1.get().type_to_string(), v0.get().type_to_string()
                 ));
             }
 
@@ -680,16 +977,19 @@ enter_frame:
         }
 
         case Instr::And: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_auint();
-                auto rhs = top_nth(0).get().get_auint();
-                pop_n(2);
-                push(Value::from_bool(lhs != 0 && rhs != 0));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_auint();
+                auto rhs = v0.get().get_auint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(lhs != 0 && rhs != 0)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
                     "cannot perform boolean AND for {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    v1.get().type_to_string(),
+                    v0.get().type_to_string()
                 ));
             }
 
@@ -697,16 +997,19 @@ enter_frame:
         }
 
         case Instr::Or: {
-            if (top_nth(1).get().is_int() && top_nth(0).get().is_int()) {
-                auto lhs = top_nth(1).get().get_auint();
-                auto rhs = top_nth(0).get().get_auint();
-                pop_n(2);
-                push(Value::from_bool(lhs != 0 || rhs != 0));
+            PROPAGATE_DYNEXP(v1, top_nth(1));
+            PROPAGATE_DYNEXP(v0, top_nth(0));
+
+            if (v1.get().is_int() && v0.get().is_int()) {
+                auto lhs = v1.get().get_auint();
+                auto rhs = v0.get().get_auint();
+                PROPAGATE_DYNEXP_VOID(pop_n(2));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(lhs != 0 || rhs != 0)));
             } else [[unlikely]] {
                 return std::unexpected(make_error(
                     "cannot perform boolean OR for {} and {}",
-                    top_nth(1).get().type_to_string(),
-                    top_nth(0).get().type_to_string()
+                    v1.get().type_to_string(),
+                    v0.get().type_to_string()
                 ));
             }
 
@@ -714,17 +1017,17 @@ enter_frame:
         }
 
         case Instr::Const: {
-            auto k = read_u32();
-            push(Value::from_int(static_cast<aint>(k)));
+            PROPAGATE_DYNEXP(k, read_u32(true));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_int(static_cast<aint>(k))));
 
             break;
         }
 
         case Instr::String: {
-            auto s = read_u32();
-            auto sv = mod_.strtab_entry_at(s);
+            PROPAGATE_DYNEXP(s, read_u32());
+            PROPAGATE_DYNEXP(sv, check_strtab(s));
             auto *v = get_object_content_ptr(alloc_string(sv.length()));
-            push(Value::from_ptr(v));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_ptr(v)));
             // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
             strcpy(TO_DATA(v)->contents, sv.data());
 
@@ -732,31 +1035,35 @@ enter_frame:
         }
 
         case Instr::Sexp: {
-            auto s = read_u32();
-            auto n = read_u32();
-            auto tag = mod_.strtab_entry_at(s);
+            PROPAGATE_DYNEXP(s, read_u32());
+            PROPAGATE_DYNEXP(n, read_u32());
+            PROPAGATE_DYNEXP(tag, check_strtab(s));
             auto *v = get_object_content_ptr(alloc_sexp(n));
             TO_SEXP(v)->tag = reinterpret_cast<auint>(tag.data());
 
-            for (size_t i = 0; i < n; ++i) {
-                get_sexp_field(TO_SEXP(v), i) = *top_nth(n - i - 1);
+            if (n > verifier::max_member_count) {
+                return std::unexpected(make_error(
+                    "too many sexp members: expected at most {}, got {}",
+                    verifier::max_member_count,
+                    n
+                ));
             }
 
-            pop_n(n);
-            push(Value::from_ptr(v));
+            for (size_t i = 0; i < n; ++i) {
+                PROPAGATE_DYNEXP_T(Value, elem, top_nth(n - i - 1));
+                get_sexp_field(TO_SEXP(v), i) = elem;
+            }
+
+            PROPAGATE_DYNEXP_VOID(pop_n(n));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_ptr(v)));
 
             break;
         }
 
-        case Instr::Sti: {
-            // the STI instruction is never emitted by the Lama compiler.
-            std::unreachable();
-        }
-
         case Instr::Sta: {
-            auto aggregate = *top_nth(2);
-            auto idx_v = *top_nth(1);
-            auto v = *top_nth(0);
+            PROPAGATE_DYNEXP_T(Value, aggregate, top_nth(2));
+            PROPAGATE_DYNEXP_T(Value, idx_v, top_nth(1));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
 
             if (!aggregate.is_aggregate()) [[unlikely]] {
                 return std::unexpected(make_error("cannot index {}", aggregate.type_to_string()));
@@ -812,14 +1119,15 @@ enter_frame:
                 std::unreachable();
             }
 
-            pop_n(3);
-            push(v);
+            PROPAGATE_DYNEXP_VOID(pop_n(3));
+            PROPAGATE_DYNEXP_VOID(push(v));
 
             break;
         }
 
         case Instr::Jmp: {
-            auto l = read_u32();
+            PROPAGATE_DYNEXP(l, read_u32());
+            PROPAGATE_DYNEXP_VOID(check_jmp(l));
             pc = l;
 
             break;
@@ -827,7 +1135,7 @@ enter_frame:
 
         case Instr::End:
         case Instr::Ret: {
-            auto v = *top_nth(0);
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
             auto &frame = frames.back();
             __gc_stack_bottom = static_cast<void *>(
                 static_cast<auint *>(__gc_stack_top) + base - args - (frame.is_closure ? 1 : 0)
@@ -837,38 +1145,43 @@ enter_frame:
                 return {};
             }
 
-            push(v);
+            PROPAGATE_DYNEXP_VOID(push(v));
             pc = frame.saved_pc;
             base = frame.saved_base;
             args = frame.saved_args;
+
+#ifdef DYNAMIC_VERIFICATION
+            locals = frame.saved_locals;
+#endif
+
             frames.pop_back();
 
             break;
         }
 
         case Instr::Drop: {
-            pop_n(1);
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
 
             break;
         }
 
         case Instr::Dup: {
-            push(*top_nth(0));
+            PROPAGATE_DYNEXP_VOID(push(*top_nth(0)));
 
             break;
         }
 
         case Instr::Swap: {
-            auto lhs = *top_nth(1);
-            auto rhs = *top_nth(0);
-            pop_n(2);
-            push(rhs);
-            push(lhs);
+            PROPAGATE_DYNEXP_T(Value, lhs, top_nth(1));
+            PROPAGATE_DYNEXP_T(Value, rhs, top_nth(0));
+            PROPAGATE_DYNEXP_VOID(pop_n(2));
+            PROPAGATE_DYNEXP_VOID(push(rhs));
+            PROPAGATE_DYNEXP_VOID(push(lhs));
         }
 
         case Instr::Elem: {
-            auto aggregate = *top_nth(1);
-            auto idx_v = *top_nth(0);
+            PROPAGATE_DYNEXP_T(Value, aggregate, top_nth(1));
+            PROPAGATE_DYNEXP_T(Value, idx_v, top_nth(0));
 
             if (!aggregate.is_aggregate()) [[unlikely]] {
                 return std::unexpected(make_error("cannot index {}", aggregate.type_to_string()));
@@ -889,19 +1202,25 @@ enter_frame:
                 );
             }
 
-            pop_n(2);
+            PROPAGATE_DYNEXP_VOID(pop_n(2));
 
             switch (aggregate.get_type()) {
             case ARRAY:
-                push(get_object_field(aggregate_data, static_cast<size_t>(idx)));
+                PROPAGATE_DYNEXP_VOID(
+                    push(get_object_field(aggregate_data, static_cast<size_t>(idx)))
+                );
                 break;
 
             case STRING:
-                push(Value::from_int(static_cast<auint>(aggregate_data->contents[idx])));
+                PROPAGATE_DYNEXP_VOID(
+                    push(Value::from_int(static_cast<auint>(aggregate_data->contents[idx])))
+                );
                 break;
 
             case SEXP:
-                push(get_sexp_field(aggregate.to_sexp(), static_cast<size_t>(idx)));
+                PROPAGATE_DYNEXP_VOID(
+                    push(get_sexp_field(aggregate.to_sexp(), static_cast<size_t>(idx)))
+                );
                 break;
 
             default:
@@ -912,70 +1231,77 @@ enter_frame:
         }
 
         case Instr::LdG: {
-            auto m = read_u32();
-            push(global(m));
+            PROPAGATE_DYNEXP(m, read_u32());
+            PROPAGATE_DYNEXP_T(Value, v, global(m));
+            PROPAGATE_DYNEXP_VOID(push(v));
 
             break;
         }
 
         case Instr::LdL: {
-            auto m = read_u32();
-            push(local(m));
+            PROPAGATE_DYNEXP(m, read_u32());
+            PROPAGATE_DYNEXP_T(Value, v, local(m));
+            PROPAGATE_DYNEXP_VOID(push(v));
 
             break;
         }
 
         case Instr::LdA: {
-            auto m = read_u32();
-            push(arg(m));
+            PROPAGATE_DYNEXP(m, read_u32());
+            PROPAGATE_DYNEXP_T(Value, v, arg(m));
+            PROPAGATE_DYNEXP_VOID(push(v));
 
             break;
         }
 
         case Instr::LdC: {
-            auto m = read_u32();
-            push(capture(m));
+            PROPAGATE_DYNEXP(m, read_u32());
+            PROPAGATE_DYNEXP_T(Value, v, capture(m));
+            PROPAGATE_DYNEXP_VOID(push(v));
 
             break;
         }
 
-        case Instr::LdaG:
-        case Instr::LdaL:
-        case Instr::LdaA:
-        case Instr::LdaC:
-            std::unreachable();
-
         case Instr::StG: {
-            auto m = read_u32();
-            global(m) = *top_nth(0);
+            PROPAGATE_DYNEXP(m, read_u32());
+            PROPAGATE_DYNEXP(g, global(m));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            g = v;
 
             break;
         }
 
         case Instr::StL: {
-            auto m = read_u32();
-            local(m) = *top_nth(0);
+            PROPAGATE_DYNEXP(m, read_u32());
+            PROPAGATE_DYNEXP(l, local(m));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            l = v;
 
             break;
         }
 
         case Instr::StA: {
-            auto m = read_u32();
-            arg(m) = *top_nth(0);
+            PROPAGATE_DYNEXP(m, read_u32());
+            PROPAGATE_DYNEXP(a, arg(m));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            a = v;
 
             break;
         }
 
         case Instr::StC: {
-            auto m = read_u32();
-            capture(m) = *top_nth(0);
+            PROPAGATE_DYNEXP(m, read_u32());
+            PROPAGATE_DYNEXP(c, capture(m));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            c = v;
 
             break;
         }
 
         case Instr::CjmpZ: {
-            auto l = read_u32();
-            auto cond = *top_nth(0);
+            PROPAGATE_DYNEXP(l, read_u32());
+            PROPAGATE_DYNEXP_VOID(check_jmp(l));
+            PROPAGATE_DYNEXP_T(Value, cond, top_nth(0));
 
             if (!cond.is_int()) [[unlikely]] {
                 return std::unexpected(make_error(
@@ -987,14 +1313,15 @@ enter_frame:
                 pc = l;
             }
 
-            pop_n(1);
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
 
             break;
         }
 
         case Instr::CjmpNz: {
-            auto l = read_u32();
-            auto cond = *top_nth(0);
+            PROPAGATE_DYNEXP(l, read_u32());
+            PROPAGATE_DYNEXP_VOID(check_jmp(l));
+            PROPAGATE_DYNEXP_T(Value, cond, top_nth(0));
 
             if (!cond.is_int()) [[unlikely]] {
                 return std::unexpected(make_error(
@@ -1006,22 +1333,50 @@ enter_frame:
                 pc = l;
             }
 
-            pop_n(1);
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
 
             break;
         }
 
         case Instr::Begin:
         case Instr::Cbegin: {
-            // read a, n.
-            read_u32();
-            read_u32();
+            PROPAGATE_DYNEXP(params, read_u32());
+            PROPAGATE_DYNEXP(local_imm, read_u32());
 
 #ifdef DYNAMIC_VERIFICATION
+            locals = local_imm;
 #else
-            const auto *proc = &info_.procs.at(call_target);
-            base = static_cast<auint *>(__gc_stack_bottom) - static_cast<auint *>(__gc_stack_top);
-            auto new_size = static_cast<uint64_t>(base) + proc->locals + proc->stack_size;
+            auto locals = local_imm;
+#endif
+
+#ifdef DYNAMIC_VERIFICATION
+            if (params > verifier::max_param_count) {
+                return std::unexpected(make_error(
+                    "too many parameters: expected at most {}, got {}",
+                    verifier::max_param_count,
+                    params
+                ));
+            }
+
+            if (is_main) {
+                if (params != 2) {
+                    return std::unexpected(
+                        make_error("the main procedure must have 2 parameters, got {}", params)
+                    );
+                }
+
+                if (bc[pc - 1] == Instr::Cbegin) {
+                    return std::unexpected(
+                        make_error("the main procedure must be declared with BEGIN")
+                    );
+                }
+            }
+#endif
+            uint32_t proc_stack_size = params >> 16;
+            params &= 0xffff;
+
+            base = stack_size();
+            auto new_size = static_cast<uint64_t>(base) + locals + proc_stack_size;
 
             if (new_size > max_stack_size) [[unlikely]] {
                 return std::unexpected(make_error("stack overflow"));
@@ -1031,21 +1386,19 @@ enter_frame:
                 stack.resize(new_size, BOX(0));
             }
 
-            args = proc->params;
-
+            args = params;
             __gc_stack_top = static_cast<void *>(stack.data());
-            __gc_stack_bottom = static_cast<void *>(stack.data() + base + proc->locals);
-#endif
+            __gc_stack_bottom = static_cast<void *>(stack.data() + base + locals);
 
 #if INTERPRETER_TRACE
             std::println(
                 std::cerr,
-                "calling {:#x} ({}{} args, {} locals, {} values)",
+                "calling {:#x} ({}{} args, {} locals, {} values pre-allocated)",
                 call_target,
                 args,
-                proc->is_closure ? " + 1" : "",
-                proc->locals,
-                proc->stack_size
+                frames.back().is_closure ? " + 1" : "",
+                locals,
+                proc_stack_size
             );
 #endif
 
@@ -1053,36 +1406,51 @@ enter_frame:
         }
 
         case Instr::Closure: {
-            auto l = read_u32();
-            auto n = read_u32();
+            PROPAGATE_DYNEXP(l, read_u32());
+            PROPAGATE_DYNEXP_VOID(check_begin(l));
+            PROPAGATE_DYNEXP(n, read_u32());
             auto *closure = get_object_content_ptr(alloc_closure(n + 1));
-            push(Value::from_ptr(closure));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_ptr(closure)));
             get_object_field(closure, 0) = Value::from_int(static_cast<auint>(l));
 
             for (size_t i = 0; i < n; ++i) {
                 auto kind = static_cast<uint8_t>(bc[pc++]);
-                auto m = read_u32();
+                PROPAGATE_DYNEXP(m, read_u32());
                 auto field = get_object_field(closure, i + 1);
 
                 switch (kind) {
-                case 0:
-                    field = *global(m);
+                case 0: {
+                    PROPAGATE_DYNEXP_T(Value, v, global(m));
+                    field = v;
                     break;
+                }
 
-                case 1:
-                    field = *local(m);
+                case 1: {
+                    PROPAGATE_DYNEXP_T(Value, v, local(m));
+                    field = v;
                     break;
+                }
 
-                case 2:
-                    field = *arg(m);
+                case 2: {
+                    PROPAGATE_DYNEXP_T(Value, v, arg(m));
+                    field = v;
                     break;
+                }
 
-                case 3:
-                    field = *capture(m);
+                case 3: {
+                    PROPAGATE_DYNEXP_T(Value, v, capture(m));
+                    field = v;
                     break;
+                }
 
                 default:
+#ifdef DYNAMIC_VERIFICATION
+                    return std::unexpected(
+                        make_error("unknown variable kind encoding: {:#02x}", kind)
+                    );
+#else
                     std::unreachable();
+#endif
                 }
             }
 
@@ -1090,8 +1458,8 @@ enter_frame:
         }
 
         case Instr::CallC: {
-            auto n = read_u32();
-            auto closure = *top_nth(n);
+            PROPAGATE_DYNEXP(n, read_u32());
+            PROPAGATE_DYNEXP_T(Value, closure, top_nth(n));
 
             if (!closure.is_closure()) [[unlikely]] {
                 return std::unexpected(make_error("cannot call {}", closure.type_to_string()));
@@ -1100,7 +1468,8 @@ enter_frame:
             auto l = closure.field(0).get().get_auint();
 
             // read the low word of the first immediate: the high word stores the stack size.
-            auto params = read_u32_at(l + 1) & 0xffff;
+            PROPAGATE_DYNEXP(params, read_u32_at(l + 1));
+            params &= 0xffff;
 
             if (params != n) [[unlikely]] {
                 return std::unexpected(
@@ -1111,63 +1480,95 @@ enter_frame:
             call_target = l;
             call_closure = true;
 
+#ifdef DYNAMIC_VERIFICATION
+            is_main = false;
+#endif
+
             goto enter_frame;
         }
 
         case Instr::Call: {
-            auto l = read_u32();
+            PROPAGATE_DYNEXP(l, read_u32());
+            PROPAGATE_DYNEXP_VOID(check_begin(l));
+
+#ifdef DYNAMIC_VERIFICATION
+            if (bc[l] == Instr::Cbegin) {
+                return std::unexpected(make_error(
+                    "cannot call a CBEGIN-declared procedure at {:#x} "
+                    "without creating a closure first",
+                    l
+                ));
+            }
+
+            PROPAGATE_DYNEXP(n, read_u32());
+
+            // read the low word of the first immediate: the high word stores the stack size.
+            PROPAGATE_DYNEXP(params, read_u32_at(l + 1));
+            params &= 0xffff;
+
+            if (params != n) [[unlikely]] {
+                return std::unexpected(
+                    make_error("the function expected {} arguments, got {}", params, n)
+                );
+            }
+#else
             // read n.
             read_u32();
+#endif
 
             call_target = l;
             call_closure = false;
+
+#ifdef DYNAMIC_VERIFICATION
+            is_main = false;
+#endif
 
             goto enter_frame;
         }
 
         case Instr::Tag: {
-            auto s = read_u32();
-            auto n = read_u32();
-            auto v = *top_nth(0);
-
-            auto expected_tag = mod_.strtab_entry_at(s);
-
-            pop_n(1);
+            PROPAGATE_DYNEXP(s, read_u32());
+            PROPAGATE_DYNEXP(n, read_u32());
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            PROPAGATE_DYNEXP(expected_tag, check_strtab(s));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
 
             if (v.is_sexp()) {
                 auto *sexp = v.to_sexp();
                 // NOLINTNEXTLINE(performance-no-int-to-ptr)
                 auto *actual_tag = reinterpret_cast<char *>(sexp->tag);
 
-                push(Value::from_bool(LEN(sexp->data_header) == n && expected_tag == actual_tag));
+                PROPAGATE_DYNEXP_VOID(push(
+                    Value::from_bool(LEN(sexp->data_header) == n && expected_tag == actual_tag)
+                ));
             } else {
-                push(Value::from_bool(false));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(false)));
             }
 
             break;
         }
 
         case Instr::Array: {
-            auto n = read_u32();
-            auto v = *top_nth(0);
+            PROPAGATE_DYNEXP(n, read_u32());
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
 
-            pop_n(1);
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
 
             if (v.is_array()) {
-                push(Value::from_bool(LEN(v.to_data()->data_header) == n));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(LEN(v.to_data()->data_header) == n)));
             } else {
-                push(Value::from_bool(false));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(false)));
             }
 
             break;
         }
 
         case Instr::Fail: {
-            auto ln = read_u32();
-            auto col = read_u32();
-            auto v = *top_nth(0);
+            PROPAGATE_DYNEXP(ln, read_u32());
+            PROPAGATE_DYNEXP(col, read_u32());
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
             // the scrutinee.
-            pop_n(1);
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
 
             return std::unexpected(
                 make_error("match failure for {} at L{}:{}", v.stringify(), ln, col)
@@ -1175,72 +1576,72 @@ enter_frame:
         }
 
         case Instr::Line: {
-            auto ln = read_u32();
+            PROPAGATE_DYNEXP(ln, read_u32());
             frames.back().line = ln;
 
             break;
         }
 
         case Instr::PattEqStr: {
-            auto lhs = *top_nth(1);
-            auto rhs = *top_nth(0);
-            pop_n(2);
+            PROPAGATE_DYNEXP_T(Value, lhs, top_nth(1));
+            PROPAGATE_DYNEXP_T(Value, rhs, top_nth(0));
+            PROPAGATE_DYNEXP_VOID(pop_n(2));
 
             if (lhs.is_string() && rhs.is_string()) {
-                push(
+                PROPAGATE_DYNEXP_VOID(push(
                     Value::from_bool(strcmp(lhs.to_data()->contents, rhs.to_data()->contents) == 0)
-                );
+                ));
             } else {
-                push(Value::from_bool(false));
+                PROPAGATE_DYNEXP_VOID(push(Value::from_bool(false)));
             }
 
             break;
         }
 
         case Instr::PattString: {
-            auto v = *top_nth(0);
-            pop_n(1);
-            push(Value::from_bool(v.is_string()));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_bool(v.is_string())));
 
             break;
         }
 
         case Instr::PattArray: {
-            auto v = *top_nth(0);
-            pop_n(1);
-            push(Value::from_bool(v.is_array()));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_bool(v.is_array())));
 
             break;
         }
 
         case Instr::PattSexp: {
-            auto v = *top_nth(0);
-            pop_n(1);
-            push(Value::from_bool(v.is_sexp()));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_bool(v.is_sexp())));
 
             break;
         }
 
         case Instr::PattRef: {
-            auto v = *top_nth(0);
-            pop_n(1);
-            push(Value::from_bool(v.is_boxed()));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_bool(v.is_boxed())));
 
             break;
         }
 
         case Instr::PattVal: {
-            auto v = *top_nth(0);
-            pop_n(1);
-            push(Value::from_bool(!v.is_boxed()));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_bool(!v.is_boxed())));
 
             break;
         }
 
         case Instr::PattFun: {
-            auto v = *top_nth(0);
-            pop_n(1);
-            push(Value::from_bool(v.is_closure()));
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_bool(v.is_closure())));
 
             break;
         }
@@ -1249,13 +1650,13 @@ enter_frame:
             aint v = 0;
             output_ << " > " << std::flush;
             input_ >> v;
-            push(Value::from_int(v));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_int(v)));
 
             break;
         }
 
         case Instr::CallLwrite: {
-            auto v = *top_nth(0);
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
 
             if (!v.is_int()) {
                 return std::unexpected(
@@ -1263,15 +1664,15 @@ enter_frame:
                 );
             }
 
-            pop_n(1);
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
             output_ << v.get_aint() << '\n';
-            push(Value());
+            PROPAGATE_DYNEXP_VOID(push(Value()));
 
             break;
         }
 
         case Instr::CallLlength: {
-            auto v = *top_nth(0);
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
 
             if (!v.is_aggregate()) {
                 return std::unexpected(
@@ -1280,18 +1681,18 @@ enter_frame:
             }
 
             aint len = static_cast<aint>(v.len());
-            pop_n(1);
-            push(Value::from_int(len));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_int(len)));
 
             break;
         }
 
         case Instr::CallLstring: {
-            auto v = *top_nth(0);
+            PROPAGATE_DYNEXP_T(Value, v, top_nth(0));
             auto s = v.stringify();
             auto *r = get_object_content_ptr(alloc_string(s.size()));
-            pop_n(1);
-            push(Value::from_ptr(r));
+            PROPAGATE_DYNEXP_VOID(pop_n(1));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_ptr(r)));
             // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
             strcpy(TO_DATA(r)->contents, s.data());
 
@@ -1299,21 +1700,47 @@ enter_frame:
         }
 
         case Instr::CallBarray: {
-            auto n = read_u32();
+            PROPAGATE_DYNEXP(n, read_u32());
+
+            if (n > verifier::max_elem_count) [[unlikely]] {
+                return std::unexpected(make_error(
+                    "too many array elements: expected at most {}, got {}",
+                    verifier::max_elem_count,
+                    n
+                ));
+            }
+
             auto *v = get_object_content_ptr(alloc_array(n));
 
             for (size_t i = 0; i < n; ++i) {
-                get_object_field(v, i) = *top_nth(n - i - 1);
+                PROPAGATE_DYNEXP_T(Value, elem, top_nth(n - i - 1));
+                get_object_field(v, i) = elem;
             }
 
-            pop_n(n);
-            push(Value::from_ptr(v));
+            PROPAGATE_DYNEXP_VOID(pop_n(n));
+            PROPAGATE_DYNEXP_VOID(push(Value::from_ptr(v)));
 
             break;
         }
 
+        case Instr::Sti: // the STI/LDA instructions are never emitted by the Lama compiler.
+        case Instr::LdaG:
+        case Instr::LdaL:
+        case Instr::LdaA:
+        case Instr::LdaC:
         case Instr::Eof:
+        default:
+#ifdef DYNAMIC_VERIFICATION
+            return std::unexpected(make_error(
+                "illegal operation at {:#x}: {:#02x}", pc - 1, static_cast<uint8_t>(bc[pc - 1])
+            ));
+#else
             std::unreachable();
+#endif
         }
+
+#ifdef DYNAMIC_VERIFICATION
+        PROPAGATE_DYNEXP_VOID(check_jmp(pc));
+#endif
     }
 }

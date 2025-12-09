@@ -8,6 +8,12 @@
 
 namespace friar::verifier {
 
+constexpr uint32_t max_stack_size = 0xffff;
+constexpr uint32_t max_captures = 0x7fff'ffff;
+constexpr uint32_t max_param_count = 0xffff;
+constexpr uint32_t max_member_count = 0xffff;
+constexpr uint32_t max_elem_count = 0xfff'ffff;
+
 /// A verification error.
 struct Error {
     /// The byte offset where the error occurred.

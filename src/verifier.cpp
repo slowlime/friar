@@ -23,11 +23,6 @@ using util::overloaded;
 
 namespace {
 
-constexpr uint32_t max_stack_height = 0xffff;
-constexpr uint32_t max_captures = 0x7fff'ffff;
-constexpr uint32_t max_param_count = 0xffff;
-constexpr uint32_t max_member_count = 0xffff;
-
 class Verifier {
 public:
     explicit Verifier(bytecode::Module &mod) : mod_(mod) {
@@ -496,10 +491,10 @@ private:
                 ));
             }
 
-            if (max_stack_height - stack_height_exit < pushes) {
+            if (max_stack_size - stack_height_exit < pushes) {
                 return std::unexpected(Error(
                     op_addr,
-                    std::format("exceeded the maximum static stack height of {}", max_stack_height)
+                    std::format("exceeded the maximum static stack height of {}", max_stack_size)
                 ));
             }
 
@@ -923,9 +918,24 @@ private:
             r = check_stack(1, 1);
             break;
 
-        case Instr::CallBarray:
-            r = read_u32("element count", addr).and_then([&](auto n) { return check_stack(n, 1); });
+        case Instr::CallBarray: {
+            auto elem_addr = addr;
+
+            r = read_u32("element count", addr).and_then([&](auto n) -> std::expected<void, Error> {
+                if (n > max_elem_count) {
+                    return std::unexpected(Error(
+                        elem_addr,
+                        std::format(
+                            "array element count ({}) exceeds the maximum of {}", n, max_elem_count
+                        )
+                    ));
+                }
+
+                return check_stack(n, 1);
+            });
+
             break;
+        }
 
         case Instr::Eof:
             return std::unexpected(Error(
