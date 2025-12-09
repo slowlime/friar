@@ -15,6 +15,7 @@ enum class Mode : uint8_t {
 struct Args {
     std::filesystem::path input_file;
     Mode mode = Mode::Run;
+    bool time = false;
 
     static Args parse_or_exit(int argc, char **argv);
 };

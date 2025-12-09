@@ -19,6 +19,8 @@ std::string_view usage =
     "Options:\n"
     "  -h, --help    Print this help message.\n"
     "\n"
+    "  -t, --time    Measure the execution time.\n"
+    "\n"
     "  --mode=MODE   Select the execution mode. Available choices:\n"
     "                - disas: disassemble the bytecode and exit.\n"
     "                - verify: only perform bytecode verification.\n"
@@ -44,6 +46,8 @@ Args Args::parse_or_exit(int argc, char **argv) {
 
                 // NOLINTNEXTLINE(concurrency-mt-unsafe)
                 exit(0);
+            } else if (arg == "-t" || arg == "--time") {
+                result.time = true;
             } else if (arg.starts_with("--")) {
                 arg.remove_prefix(2);
                 auto name = arg;

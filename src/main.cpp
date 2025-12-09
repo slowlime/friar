@@ -1,5 +1,6 @@
 #include <iostream>
 #include <print>
+#include <ratio>
 
 #include "args.hpp"
 #include "config.hpp"
@@ -7,6 +8,7 @@
 #include "idiom.hpp"
 #include "interpreter.hpp"
 #include "loader.hpp"
+#include "src/time.hpp"
 #include "util.hpp"
 #include "verifier.hpp"
 
@@ -56,6 +58,9 @@ int print_idioms(const bytecode::Module &mod, const verifier::ModuleInfo &mod_in
 
 int main(int argc, char **argv) {
     auto args = friar::args::Args::parse_or_exit(argc, argv);
+    time::Timings timings;
+    timings.perform_measurements = args.time;
+
     auto input = util::open_file(args.input_file);
 
     if (!input) {
@@ -69,7 +74,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    auto mod = loader::Loader(args.input_file.c_str(), *input).load();
+    auto mod = timings.measure("file loading", [&] {
+        return loader::Loader(args.input_file.c_str(), *input).load();
+    });
 
     if (!mod) {
         auto &e = mod.error();
@@ -90,15 +97,14 @@ int main(int argc, char **argv) {
 
     std::optional<decltype(verifier::verify(*mod))> mod_info;
 
-    if (
 #ifdef DYNAMIC_VERIFICATION
-        args.mode == args::Mode::Idiom
-#else
-        true
+    if (args.mode == args::Mode::Idiom) {
 #endif
-    ) {
-        mod_info = verifier::verify(*mod);
+        mod_info =
+            timings.measure("static bytecode verification", [&] { return verifier::verify(*mod); });
+#ifdef DYNAMIC_VERIFICATION
     }
+#endif
 
     if (mod_info && !*mod_info) {
         auto &e = mod_info->error();
@@ -123,7 +129,7 @@ int main(int argc, char **argv) {
         std::cin,
         std::cout
     );
-    auto r = interp.run();
+    auto r = timings.measure("interpretation", [&] { return interp.run(); });
 
     if (!r) {
         auto &e = r.error();
@@ -164,6 +170,14 @@ int main(int argc, char **argv) {
         }
 
         return 1;
+    }
+
+    if (timings.perform_measurements) {
+        std::println(std::cerr, "Timings:");
+        for (const auto &m : timings.measurements) {
+            std::chrono::duration<double, std::milli> elapsed = m.elapsed;
+            std::println(std::cerr, "  - Stage \"{}\" took {} ms", m.name, elapsed);
+        }
     }
 
     return 0;

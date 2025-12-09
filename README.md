@@ -31,6 +31,9 @@ The minimum supported Meson version is 1.1.
    $ meson setup build-release -Doptimization=3
    ```
 
+   - Friar defines a number of options you can change by passing `-D<name>=<value>` flags.
+     To list all available options, run `meson configure`.
+
 2. Compile the executable:
 
    ```
@@ -50,6 +53,8 @@ Usage: friar [-h] [--mode=MODE] [--] <input>
 Options:
   -h, --help    Print this help message.
 
+  -t, --time    Measure the execution time.
+
   --mode=MODE   Select the execution mode. Available choices:
                 - disas: disassemble the bytecode and exit.
                 - verify: only perform bytecode verification.
@@ -61,7 +66,31 @@ Options:
 You can run Lama's test suite via `./scripts/run-tests.sh`.
 
 ## Performance
-In the `Sort.lama` benchmark (included in the Lama repository), Friar performs about 2.7 times faster (≈ 123 s) than Lama's recursive interpreter (≈ 328 s), as measured on my machine (Linux, AMD Ryzen 9 7950X, pinned to single hardware thread).
+Below are the results of running the `Sort.lama` benchmark (included in the Lama repository) on different interpreters.
+Each measurement is averaged over 5 runs, performed on my machine (Linux, AMD Ryzen 9 7950X, pinned to single hardware thread).
+
+Interpreter                  | Total runtime (s) | Relative speedup over previous
+:----------------------------|:------------------|:------------------------------
+`lamac -i`                   | 316               | N/A
+`friar` (dynamic validation) | 167.3             | 89.0%
+`friar` (static validation)  | 121.4             | 37.8%
+`lamac -s`                   | 93.4              | 30.3%
+
+The two `friar` entries are both compiled with `-Doptimization=3` and only differ in the value of the `-Ddynamic_verification` option:
+
+- When `=true`, bytecode validity is checked "on the fly" during interpretation.
+  While this allows to run more esoterically constructed programs, doing all these checks slows the overall performance down.
+
+- When `=false`, before interpretation, bytecode is statically validated to be free of common errors: lack of stack operands, wrong instruction encoding, etc.
+  This allows the interpreter itself to assume bytecode validity and elide these checks, improving the performance by ~38%.
+
+  - The verifier requires that stack heights are equal at control-flow merge points.
+    In addition, all statically reachable instructions, including those that are never executed dynamically, need to be valid.
+    This renders some (otherwise correct) programs unable to pass validation.
+    However, since `lamac` never emits such programs, it isn't an issue in practice.
+
+  - The `-t` option allows to measure individual stages of `friar` execution.
+    It shows that bytecode validation takes a negligible amount of time (on the order of 10 μs).
 
 ## Bytecode frequency analyzer
 Friar includes a bytecode frequency analyzer (`--mode=idiom`), which looks for sequences of one or two instructions (called "idioms" for conciseness) and shows the number of times they occur statically in the bytecode.
